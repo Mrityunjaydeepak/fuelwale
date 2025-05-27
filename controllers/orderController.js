@@ -1,45 +1,65 @@
 const express = require('express');
-const router = express.Router();
-const Model = require('../models/Order');
+const router  = express.Router();
+const Order   = require('../models/Order');
 
-// GET all
+// GET /api/orders
+// Return all orders
 router.get('/', async (req, res, next) => {
   try {
-    const list = await Model.find();
-    res.json(list);
-  } catch (err) { next(err); }
+    const orders = await Order.find({});
+    res.json(orders);
+  } catch (err) {
+    next(err);
+  }
 });
 
-// GET by id
+// GET /api/orders/:id
+// Return a single order by ID
 router.get('/:id', async (req, res, next) => {
   try {
-    const item = await Model.findById(req.params.id);
-    res.json(item);
-  } catch (err) { next(err); }
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    res.json(order);
+  } catch (err) {
+    next(err);
+  }
 });
 
-// CREATE
+// POST /api/orders
+// Create a new order
 router.post('/', async (req, res, next) => {
   try {
-    const newItem = await Model.create(req.body);
-    res.status(201).json(newItem);
-  } catch (err) { next(err); }
+    const { salesOrderNo, custCd, productCd, orderQty, deliveryDate, deliveryTimeSlot } = req.body;
+    const newOrder = await Order.create({ salesOrderNo, custCd, productCd, orderQty, deliveryDate, deliveryTimeSlot });
+    res.status(201).json(newOrder);
+  } catch (err) {
+    next(err);
+  }
 });
 
-// UPDATE
+// PUT /api/orders/:id
+// Update an existing order
 router.put('/:id', async (req, res, next) => {
   try {
-    const updated = await Model.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const updates = req.body;
+    const updated = await Order.findByIdAndUpdate(req.params.id, updates, { new: true });
+    if (!updated) return res.status(404).json({ error: 'Order not found' });
     res.json(updated);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
-// DELETE
+// DELETE /api/orders/:id
+// Remove an order
 router.delete('/:id', async (req, res, next) => {
   try {
-    await Model.findByIdAndDelete(req.params.id);
-    res.json({ deleted: true });
-  } catch (err) { next(err); }
+    const deleted = await Order.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Order not found' });
+    res.json({ message: 'Order removed' });
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;
