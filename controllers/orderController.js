@@ -3,7 +3,6 @@ const router  = express.Router();
 const Order   = require('../models/Order');
 
 // GET /api/orders
-// Return all orders
 router.get('/', async (req, res, next) => {
   try {
     const orders = await Order.find({});
@@ -14,7 +13,6 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/orders/:id
-// Return a single order by ID
 router.get('/:id', async (req, res, next) => {
   try {
     const order = await Order.findById(req.params.id);
@@ -26,11 +24,30 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // POST /api/orders
-// Create a new order
 router.post('/', async (req, res, next) => {
   try {
-    const { salesOrderNo, custCd, productCd, orderQty, deliveryDate, deliveryTimeSlot } = req.body;
-    const newOrder = await Order.create({ salesOrderNo, custCd, productCd, orderQty, deliveryDate, deliveryTimeSlot });
+    const {
+      salesOrderNo,
+      custCd,
+      productCd,
+      orderQty,
+      deliveryDate,
+      deliveryTimeSlot,
+      orderType,     // ← new
+      orderStatus    // ← new
+    } = req.body;
+
+    const newOrder = await Order.create({
+      salesOrderNo,
+      custCd,
+      productCd,
+      orderQty,
+      deliveryDate,
+      deliveryTimeSlot,
+      orderType,     // will default to 'regular' if undefined
+      orderStatus    // will default to 'PENDING' if undefined
+    });
+
     res.status(201).json(newOrder);
   } catch (err) {
     next(err);
@@ -38,11 +55,34 @@ router.post('/', async (req, res, next) => {
 });
 
 // PUT /api/orders/:id
-// Update an existing order
 router.put('/:id', async (req, res, next) => {
   try {
-    const updates = req.body;
-    const updated = await Order.findByIdAndUpdate(req.params.id, updates, { new: true });
+    // allow updating all fields, including the new ones
+    const updates = (({
+      salesOrderNo,
+      custCd,
+      productCd,
+      orderQty,
+      deliveryDate,
+      deliveryTimeSlot,
+      orderType,
+      orderStatus
+    }) => ({
+      salesOrderNo,
+      custCd,
+      productCd,
+      orderQty,
+      deliveryDate,
+      deliveryTimeSlot,
+      orderType,
+      orderStatus
+    }))(req.body);
+
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      updates,
+      { new: true }
+    );
     if (!updated) return res.status(404).json({ error: 'Order not found' });
     res.json(updated);
   } catch (err) {
@@ -51,7 +91,6 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // DELETE /api/orders/:id
-// Remove an order
 router.delete('/:id', async (req, res, next) => {
   try {
     const deleted = await Order.findByIdAndDelete(req.params.id);
