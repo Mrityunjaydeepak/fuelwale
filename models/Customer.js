@@ -12,7 +12,17 @@ const CustomerSchema = new Schema({
   area: { type: String, maxlength: 30 },
   city: { type: String, maxlength: 20 },
   pin: { type: Number },
-  stateCd: { type: String, maxlength: 2 }
+  stateCd: { type: String, maxlength: 2 },
+  status:           { 
+   type: String, 
+   enum: ['Active','Inactive','Suspended'], 
+   default: 'Active',
+   required: true
+ },
+ outstandingAmount:{ 
+   type: Number, 
+   default: 0 
+ },
 }, { timestamps: true });
 
 module.exports = model('Customer', CustomerSchema);

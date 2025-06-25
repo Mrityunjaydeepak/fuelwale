@@ -1,25 +1,20 @@
-const mongoose = require('mongoose');
-const { Schema } = mongoose;
+// models/Order.js
+const { Schema, model } = require('mongoose');
 
 const OrderSchema = new Schema({
-  salesOrderNo:     { type: String, required: true },
-  custCd:           { type: String, required: true },
-  productCd:        { type: String, required: true },
-  orderQty:         { type: Number, required: true },
-  deliveryDate:     { type: Date },
-  deliveryTimeSlot: { type: String },
-
-  // New fields
-  orderType: {
-    type: String,
-    enum: ['immediate', 'regular'],
-    default: 'regular'
-  },
-  orderStatus: {
-    type: String,
-    enum: ['COMPLETED', 'PARTIALLY_COMPLETED', 'PENDING', 'CANCELLED'],
-    default: 'PENDING'
-  }
+  empCd:            { type: String, required: true },
+  customer:         { type: Schema.Types.ObjectId, ref: 'Customer', required: true },
+  shipToAddress:    { type: String, required: true },
+  items: [
+    {
+      productName:  { type: String, default: 'diesel' },
+      quantity:     { type: Number, required: true },
+      rate:         { type: Number, required: true },
+    }
+  ],
+  deliveryDate:     { type: Date,   required: true },
+  deliveryTimeSlot: { type: String, required: true },
+  confirmedAt:      { type: Date,   default: Date.now },
 }, { timestamps: true });
 
-module.exports = mongoose.model('Order', OrderSchema);
+module.exports = model('Order', OrderSchema);

@@ -1,104 +1,124 @@
-const express = require('express');
-const router  = express.Router();
-const Order   = require('../models/Order');
+// controllers/orderController.js
+const express     = require('express');
+const router      = express.Router();
+const requireAuth = require('../middleware/requireAuth');
+const Customer    = require('../models/Customer');
+const Order       = require('../models/Order');
 
-// GET /api/orders
-router.get('/', async (req, res, next) => {
-  try {
-    const orders = await Order.find({});
-    res.json(orders);
-  } catch (err) {
-    next(err);
-  }
-});
+// Protect all order routes with JWT
+router.use(requireAuth);
 
-// GET /api/orders/:id
-router.get('/:id', async (req, res, next) => {
-  try {
-    const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    res.json(order);
-  } catch (err) {
-    next(err);
+// Only sales (1) or admin (2) can use this
+function requireSalesOrAdmin(req, res, next) {
+  const lvl = req.user.accessLevel;
+  if (lvl !== 1 && lvl !== 2) {
+    return res
+      .status(403)
+      .json({ error: 'Orders are restricted to sales and administrators' });
   }
-});
+  next();
+}
+
+// GET /api/orders/customers
+router.get(
+  '/customers',
+  requireSalesOrAdmin,
+  async (req, res, next) => {
+    try {
+      const { empCd, accessLevel } = req.user;
+      const filter = accessLevel === 2
+        ? {}
+        : { empCdMapped: empCd };
+
+      const custs = await Customer.find(filter).lean();
+      const result = custs.map(c => ({
+        id:                c._id,
+        custCd:            c.custCd,
+        custName:          c.custName,
+        status:            c.status,
+        outstandingAmount: c.outstandingAmount,
+        selectable:        c.status === 'Active',
+        shipToAddresses:   [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(a => !!a)
+      }));
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // POST /api/orders
-router.post('/', async (req, res, next) => {
-  try {
+router.post(
+  '/',
+  requireSalesOrAdmin,
+  async (req, res, next) => {
+    // ---- DEBUG LOGGING ----
+    console.log('>>> POST /api/orders'); 
+    console.log('req.user:', req.user);
+    console.log('req.body:', JSON.stringify(req.body, null, 2));
+    // ------------------------
+
+    // Destructure request
+    const { empCd } = req.user;
     const {
-      salesOrderNo,
-      custCd,
-      productCd,
-      orderQty,
+      customerId,
+      shipToAddress,
+      items,
       deliveryDate,
-      deliveryTimeSlot,
-      orderType,     // ← new
-      orderStatus    // ← new
+      deliveryTimeSlot
     } = req.body;
 
-    const newOrder = await Order.create({
-      salesOrderNo,
-      custCd,
-      productCd,
-      orderQty,
-      deliveryDate,
-      deliveryTimeSlot,
-      orderType,     // will default to 'regular' if undefined
-      orderStatus    // will default to 'PENDING' if undefined
-    });
+    // Validate presence of each field
+    const missing = [];
+    if (!customerId)      missing.push('customerId');
+    if (!shipToAddress)   missing.push('shipToAddress');
+    if (!items)           missing.push('items');
+    if (!deliveryDate)    missing.push('deliveryDate');
+    if (!deliveryTimeSlot)missing.push('deliveryTimeSlot');
+    if (missing.length) {
+      return res
+        .status(400)
+        .json({ error: `Missing fields in body: ${missing.join(', ')}` });
+    }
 
-    res.status(201).json(newOrder);
-  } catch (err) {
-    next(err);
+    try {
+      // 1) Check customer exists, mapped to this emp, and is Active
+      const cust = await Customer.findOne({
+        _id:          customerId,
+        empCdMapped: empCd
+      });
+      if (!cust) {
+        return res
+          .status(403)
+          .json({ error: 'Customer not accessible by this employee' });
+      }
+      if (cust.status !== 'Active') {
+        return res
+          .status(400)
+          .json({ error: 'Cannot place order for inactive/suspended customer' });
+      }
+
+      // 2) Create the order
+      const order = await Order.create({
+        empCd,
+        customer:       cust._id,
+        shipToAddress,
+        items:          items.map(i => ({
+                           productName: 'diesel',
+                           quantity:    i.quantity,
+                           rate:        i.rate
+                         })),
+        deliveryDate:   new Date(deliveryDate),
+        deliveryTimeSlot,
+        confirmedAt:    new Date()
+      });
+
+      res.status(201).json(order);
+    } catch (err) {
+      next(err);
+    }
   }
-});
-
-// PUT /api/orders/:id
-router.put('/:id', async (req, res, next) => {
-  try {
-    // allow updating all fields, including the new ones
-    const updates = (({
-      salesOrderNo,
-      custCd,
-      productCd,
-      orderQty,
-      deliveryDate,
-      deliveryTimeSlot,
-      orderType,
-      orderStatus
-    }) => ({
-      salesOrderNo,
-      custCd,
-      productCd,
-      orderQty,
-      deliveryDate,
-      deliveryTimeSlot,
-      orderType,
-      orderStatus
-    }))(req.body);
-
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
-      updates,
-      { new: true }
-    );
-    if (!updated) return res.status(404).json({ error: 'Order not found' });
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// DELETE /api/orders/:id
-router.delete('/:id', async (req, res, next) => {
-  try {
-    const deleted = await Order.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ error: 'Order not found' });
-    res.json({ message: 'Order removed' });
-  } catch (err) {
-    next(err);
-  }
-});
+);
 
 module.exports = router;

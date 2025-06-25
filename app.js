@@ -19,7 +19,7 @@ mongoose.connect(process.env.MONGO_URI, {
 const userRouter             = require('./controllers/userController');
 const employeeRouter         = require('./controllers/employeeController');
 const depotRouter            = require('./controllers/depotController');
-const customerRouter         = require('./controllers/customerController');
+const customerRouter         = require('./routes/customerRoutes');
 const routeRouter            = require('./controllers/routeController');
 const loadingRouter          = require('./controllers/loadingController');
 const loadingSourceRouter    = require('./controllers/loadingsourceController');
@@ -28,6 +28,7 @@ const bowserInventoryRouter  = require('./controllers/bowserinventoryController'
 const paymentReceivedRouter  = require('./controllers/paymentreceivedController');
 const orderRouter            = require('./controllers/orderController');
 const salesAssociateRouter   = require('./controllers/salesAssociateController'); 
+const authRouter     = require('./routes/auth');
 const driverRouter = require('./controllers/driverController');
 app.use('/api/drivers', driverRouter); // <— make sure this path is correct
 
@@ -43,6 +44,7 @@ app.use('/api/vehiclemasters',     vehicleMasterRouter);
 app.use('/api/bowserinventories',  bowserInventoryRouter);
 app.use('/api/payments',           paymentReceivedRouter);
 app.use('/api/orders',             orderRouter);
+app.use('/api/auth',                authRouter);
 app.use('/api/sales-associates',   salesAssociateRouter);  // <— this line
 
 // Fallback 404 for APIs
