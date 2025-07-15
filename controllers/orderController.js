@@ -1,65 +1,82 @@
 // controllers/orderController.js
-const express     = require('express');
-const router      = express.Router();
-const requireAuth = require('../middleware/requireAuth');
-const Customer    = require('../models/Customer');
-const Order       = require('../models/Order');
 
-// Protect all order routes with JWT
+const express = require('express');
+const router = express.Router();
+const { body, validationResult } = require('express-validator');
+const pino = require('pino');
+
+const requireAuth = require('../middleware/requireAuth');
+const Customer = require('../models/Customer');
+const Order = require('../models/Order');
+
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+// 🔐 Protect all routes
 router.use(requireAuth);
 
-// Only sales (1) or admin (2) can use this
+// 🔒 Allow only sales or admin
 function requireSalesOrAdmin(req, res, next) {
   const lvl = req.user.accessLevel;
   if (lvl !== 1 && lvl !== 2) {
-    return res
-      .status(403)
-      .json({ error: 'Orders are restricted to sales and administrators' });
+    return res.status(403).json({ error: 'Orders are restricted to sales and administrators' });
   }
   next();
 }
 
-// GET /api/orders/customers
-router.get(
-  '/customers',
-  requireSalesOrAdmin,
-  async (req, res, next) => {
-    try {
-      const { empCd, accessLevel } = req.user;
-      const filter = accessLevel === 2
-        ? {}
-        : { empCdMapped: empCd };
-
-      const custs = await Customer.find(filter).lean();
-      const result = custs.map(c => ({
-        id:                c._id,
-        custCd:            c.custCd,
-        custName:          c.custName,
-        status:            c.status,
-        outstandingAmount: c.outstandingAmount,
-        selectable:        c.status === 'Active',
-        shipToAddresses:   [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(a => !!a)
-      }));
-
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-// POST /api/orders
+// 📥 POST /api/orders — create a new order
 router.post(
   '/',
-  requireSalesOrAdmin,
-  async (req, res, next) => {
-    // ---- DEBUG LOGGING ----
-    console.log('>>> POST /api/orders'); 
-    console.log('req.user:', req.user);
-    console.log('req.body:', JSON.stringify(req.body, null, 2));
-    // ------------------------
+  [
+    body('customerId')
+      .exists().withMessage('customerId is required')
+      .bail()
+      .isMongoId().withMessage('customerId must be a valid Mongo ID'),
 
-    // Destructure request
+    body('shipToAddress')
+      .exists().withMessage('shipToAddress is required')
+      .bail()
+      .isString().withMessage('shipToAddress must be a string')
+      .notEmpty().withMessage('shipToAddress cannot be empty'),
+
+    body('items')
+      .exists().withMessage('items is required')
+      .bail()
+      .isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+
+    body('items.*.productName')
+      .exists().withMessage('productName is required for each item'),
+
+    body('items.*.quantity')
+      .exists().withMessage('quantity is required for each item')
+      .bail()
+      .isInt({ gt: 0 }).withMessage('quantity must be an integer > 0'),
+
+    body('items.*.rate')
+      .exists().withMessage('rate is required for each item')
+      .bail()
+      .isFloat({ gt: 0 }).withMessage('rate must be a number > 0'),
+
+    body('deliveryDate')
+      .exists().withMessage('deliveryDate is required')
+      .bail()
+      .isISO8601().withMessage('deliveryDate must be ISO 8601')
+      .toDate(),
+
+    body('deliveryTimeSlot')
+      .exists().withMessage('deliveryTimeSlot is required')
+      .bail()
+      .matches(/^\d{2}:\d{2}\s*-\s*\d{2}:\d{2}$/)
+      .withMessage('deliveryTimeSlot must be in format HH:MM - HH:MM'),
+
+    (req, res, next) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+      next();
+    }
+  ],
+  async (req, res, next) => {
     const { empCd } = req.user;
     const {
       customerId,
@@ -69,56 +86,161 @@ router.post(
       deliveryTimeSlot
     } = req.body;
 
-    // Validate presence of each field
-    const missing = [];
-    if (!customerId)      missing.push('customerId');
-    if (!shipToAddress)   missing.push('shipToAddress');
-    if (!items)           missing.push('items');
-    if (!deliveryDate)    missing.push('deliveryDate');
-    if (!deliveryTimeSlot)missing.push('deliveryTimeSlot');
-    if (missing.length) {
-      return res
-        .status(400)
-        .json({ error: `Missing fields in body: ${missing.join(', ')}` });
-    }
+    logger.debug({
+      route: 'POST /api/orders',
+      user: req.user,
+      body: req.body
+    });
 
     try {
-      // 1) Check customer exists, mapped to this emp, and is Active
+      // ⏱ Validate time range logic
+      const [start, end] = deliveryTimeSlot.split('-').map(t => t.trim());
+      const startTime = new Date(`1970-01-01T${start}:00Z`);
+      const endTime = new Date(`1970-01-01T${end}:00Z`);
+      if (startTime >= endTime) {
+        return res.status(400).json({ error: 'End time must be after start time' });
+      }
+
+      // ✅ Validate customer mapping
       const cust = await Customer.findOne({
-        _id:          customerId,
+        _id: customerId,
         empCdMapped: empCd
       });
+
       if (!cust) {
-        return res
-          .status(403)
-          .json({ error: 'Customer not accessible by this employee' });
-      }
-      if (cust.status !== 'Active') {
-        return res
-          .status(400)
-          .json({ error: 'Cannot place order for inactive/suspended customer' });
+        return res.status(403).json({ error: 'Customer not accessible by this employee' });
       }
 
-      // 2) Create the order
+      if (cust.status !== 'Active') {
+        return res.status(400).json({ error: 'Cannot place order for inactive/suspended customer' });
+      }
+
+      // 💾 Save order
       const order = await Order.create({
         empCd,
-        customer:       cust._id,
+        customer: cust._id,
         shipToAddress,
-        items:          items.map(i => ({
-                           productName: 'diesel',
-                           quantity:    i.quantity,
-                           rate:        i.rate
-                         })),
-        deliveryDate:   new Date(deliveryDate),
+        items: items.map(i => ({
+          productName: i.productName,
+          quantity: i.quantity,
+          rate: i.rate
+        })),
+        deliveryDate,
         deliveryTimeSlot,
-        confirmedAt:    new Date()
+        confirmedAt: new Date()
       });
 
-      res.status(201).json(order);
+      res.status(201).json({
+        id: order._id,
+        customer: order.customer,
+        shipToAddress: order.shipToAddress,
+        items: order.items,
+        deliveryDate: order.deliveryDate,
+        deliveryTimeSlot: order.deliveryTimeSlot,
+        confirmedAt: order.confirmedAt
+      });
     } catch (err) {
+      if (err.name === 'ValidationError' || err.name === 'CastError') {
+        return res.status(400).json({ error: err.message });
+      }
       next(err);
     }
   }
 );
+// DELETE /api/orders/:id — delete an order
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const deleted = await Order.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    res.json({ deleted: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// 📤 GET /api/orders — list orders for logged-in user
+router.get('/', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { empCd, accessLevel } = req.user;
+
+    const filter = accessLevel === 2 ? {} : { empCd };
+
+    const orders = await Order.find(filter)
+      .populate('customer', 'custCd custName')
+      .lean();
+
+    const result = orders.map(o => ({
+      _id: o._id,
+      salesOrderNo: o._id.toString().slice(-6),
+      createdAt: o.createdAt,
+      custCd: o.customer?.custCd,
+      orderQty: o.items.reduce((sum, i) => sum + i.quantity, 0),
+      orderType: o.orderType || 'Regular', // Placeholder
+      orderStatus: o.orderStatus || 'PENDING'
+    }));
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+// PUT /api/orders/:id — update order status (or other fields)
+router.put('/:id', async (req, res, next) => {
+  try {
+    const updates = {};
+    
+    if (req.body.orderStatus) {
+      updates.orderStatus = req.body.orderStatus;
+    }
+
+    // You can allow updating other fields as needed
+    // e.g. updates.deliveryDate = req.body.deliveryDate
+
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      updates,
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// 👥 GET /api/orders/customers — list accessible customers
+router.get('/customers', requireSalesOrAdmin, async (req, res, next) => {
+  try {
+    const { empCd, accessLevel } = req.user;
+
+    const filter = accessLevel === 2
+      ? {}
+      : { empCdMapped: empCd };
+
+    const custs = await Customer.find(filter).lean();
+
+    const result = custs.map(c => ({
+      id: c._id,
+      custCd: c.custCd,
+      custName: c.custName,
+      status: c.status,
+      outstandingAmount: c.outstandingAmount,
+      selectable: c.status === 'Active',
+      shipToAddresses: [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(Boolean)
+    }));
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;

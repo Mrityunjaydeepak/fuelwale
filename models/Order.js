@@ -1,4 +1,3 @@
-// models/Order.js
 const { Schema, model } = require('mongoose');
 
 const OrderSchema = new Schema({
@@ -12,9 +11,24 @@ const OrderSchema = new Schema({
       rate:         { type: Number, required: true },
     }
   ],
-  deliveryDate:     { type: Date,   required: true },
+  deliveryDate:     { type: Date, required: true },
   deliveryTimeSlot: { type: String, required: true },
-  confirmedAt:      { type: Date,   default: Date.now },
+
+  // ✅ Add orderStatus
+  orderStatus: {
+    type: String,
+    enum: ['PENDING', 'PARTIALLY_COMPLETED', 'COMPLETED', 'CANCELLED'],
+    default: 'PENDING'
+  },
+
+  // ✅ Add orderType
+  orderType: {
+    type: String,
+    enum: ['Regular', 'Express'],
+    default: 'Regular'
+  },
+
+  confirmedAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
 module.exports = model('Order', OrderSchema);

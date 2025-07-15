@@ -5,9 +5,9 @@ const bcrypt = require('bcryptjs');
 const EmployeeSchema = new Schema({
   empCd:      { type: String, required: true, unique: true },
   empName:    { type: String, required: true },
-  depotCd:    { type: String, required: true },
+  depotCd:    { type: String},
   accessLevel:{ type: Number, required: true },
-  password:   { type: String, required: true },       // ← new
+
 }, { timestamps: true });
 
 // Hash password before saving
