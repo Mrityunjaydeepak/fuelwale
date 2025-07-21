@@ -2,21 +2,30 @@
 const jwt = require('jsonwebtoken');
 
 module.exports = function requireAdmin(req, res, next) {
-  const auth = req.headers.authorization?.split(' ')[1];
-  if (!auth) return res.status(401).json({ error: 'Missing token' });
+  // 1) Grab and validate the Authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Missing Authorization header' });
+  }
+  const [scheme, token] = authHeader.split(' ');
+  if (scheme !== 'Bearer' || !token) {
+    return res.status(400).json({ error: 'Malformed Authorization header' });
+  }
 
+  // 2) Verify JWT signature & extract payload
   let payload;
   try {
-    payload = jwt.verify(auth, process.env.JWT_SECRET);
-  } catch {
+    payload = jwt.verify(token, process.env.JWT_SECRET);
+  } catch (err) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 
-  if (payload.userType !== 'A') {
+  // 3) Ensure the userType is “A” (admin), case-insensitive
+  if (payload.userType.toLowerCase() !== 'a') {
     return res.status(403).json({ error: 'Admins only' });
   }
 
-  // attach user to req if you need it later
+  // 4) Attach the decoded payload to req.user and continue
   req.user = payload;
   next();
 };
