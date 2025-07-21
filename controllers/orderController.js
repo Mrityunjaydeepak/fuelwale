@@ -1,13 +1,13 @@
 // controllers/orderController.js
 
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { body, validationResult } = require('express-validator');
-const pino = require('pino');
-
+const pino    = require('pino');
+const mongoose = require('mongoose');
 const requireAuth = require('../middleware/requireAuth');
-const Customer = require('../models/Customer');
-const Order = require('../models/Order');
+const Customer    = require('../models/Customer');
+const Order       = require('../models/Order');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -93,51 +93,47 @@ router.post(
     });
 
     try {
-      // ⏱ Validate time range logic
+      // Validate time range
       const [start, end] = deliveryTimeSlot.split('-').map(t => t.trim());
-      const startTime = new Date(`1970-01-01T${start}:00Z`);
-      const endTime = new Date(`1970-01-01T${end}:00Z`);
-      if (startTime >= endTime) {
+      if (new Date(`1970-01-01T${start}:00Z`) >= new Date(`1970-01-01T${end}:00Z`)) {
         return res.status(400).json({ error: 'End time must be after start time' });
       }
 
-      // ✅ Validate customer mapping
+      // Customer mapping
       const cust = await Customer.findOne({
         _id: customerId,
         empCdMapped: empCd
       });
-
       if (!cust) {
         return res.status(403).json({ error: 'Customer not accessible by this employee' });
       }
-
       if (cust.status !== 'Active') {
         return res.status(400).json({ error: 'Cannot place order for inactive/suspended customer' });
       }
 
-      // 💾 Save order
+      // Save order
       const order = await Order.create({
         empCd,
-        customer: cust._id,
+        customer:       cust._id,
         shipToAddress,
-        items: items.map(i => ({
+        items:          items.map(i => ({
           productName: i.productName,
-          quantity: i.quantity,
-          rate: i.rate
+          quantity:    i.quantity,
+          rate:        i.rate
         })),
         deliveryDate,
         deliveryTimeSlot,
-        confirmedAt: new Date()
+        confirmedAt:    new Date()
       });
 
       res.status(201).json({
-        id: order._id,
-        customer: order.customer,
-        shipToAddress: order.shipToAddress,
-        items: order.items,
-        deliveryDate: order.deliveryDate,
+        id:             order._id,
+        customer:       order.customer,
+        shipToAddress:  order.shipToAddress,
+        items:          order.items,
+        deliveryDate:   order.deliveryDate,
         deliveryTimeSlot: order.deliveryTimeSlot,
-        confirmedAt: order.confirmedAt
+        confirmedAt:    order.confirmedAt
       });
     } catch (err) {
       if (err.name === 'ValidationError' || err.name === 'CastError') {
@@ -147,7 +143,8 @@ router.post(
     }
   }
 );
-// DELETE /api/orders/:id — delete an order
+
+// 🗑 DELETE /api/orders/:id — delete an order
 router.delete('/:id', async (req, res, next) => {
   try {
     const deleted = await Order.findByIdAndDelete(req.params.id);
@@ -160,26 +157,23 @@ router.delete('/:id', async (req, res, next) => {
   }
 });
 
-
 // 📤 GET /api/orders — list orders for logged-in user
 router.get('/', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const { empCd, accessLevel } = req.user;
-
     const filter = accessLevel === 2 ? {} : { empCd };
-
     const orders = await Order.find(filter)
       .populate('customer', 'custCd custName')
       .lean();
 
     const result = orders.map(o => ({
-      _id: o._id,
-      salesOrderNo: o._id.toString().slice(-6),
-      createdAt: o.createdAt,
-      custCd: o.customer?.custCd,
-      orderQty: o.items.reduce((sum, i) => sum + i.quantity, 0),
-      orderType: o.orderType || 'Regular', // Placeholder
-      orderStatus: o.orderStatus || 'PENDING'
+      _id:           o._id,
+      salesOrderNo:  o._id.toString().slice(-6),
+      createdAt:     o.createdAt,
+      custCd:        o.customer?.custCd,
+      orderQty:      o.items.reduce((sum, i) => sum + i.quantity, 0),
+      orderType:     o.orderType || 'Regular',
+      orderStatus:   o.orderStatus || 'PENDING'
     }));
 
     res.json(result);
@@ -187,57 +181,60 @@ router.get('/', requireSalesOrAdmin, async (req, res, next) => {
     next(err);
   }
 });
-// PUT /api/orders/:id — update order status (or other fields)
-router.put('/:id', async (req, res, next) => {
-  try {
-    const updates = {};
-    
-    if (req.body.orderStatus) {
-      updates.orderStatus = req.body.orderStatus;
-    }
-
-    // You can allow updating other fields as needed
-    // e.g. updates.deliveryDate = req.body.deliveryDate
-
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
-      updates,
-      { new: true }
-    );
-
-    if (!updated) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
-
 
 // 👥 GET /api/orders/customers — list accessible customers
 router.get('/customers', requireSalesOrAdmin, async (req, res, next) => {
   try {
     const { empCd, accessLevel } = req.user;
-
-    const filter = accessLevel === 2
-      ? {}
-      : { empCdMapped: empCd };
-
+    const filter = accessLevel === 2 ? {} : { empCdMapped: empCd };
     const custs = await Customer.find(filter).lean();
 
     const result = custs.map(c => ({
-      id: c._id,
-      custCd: c.custCd,
-      custName: c.custName,
-      status: c.status,
-      outstandingAmount: c.outstandingAmount,
-      selectable: c.status === 'Active',
-      shipToAddresses: [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(Boolean)
+      id:               c._id,
+      custCd:           c.custCd,
+      custName:         c.custName,
+      status:           c.status,
+      outstandingAmount:c.outstandingAmount,
+      selectable:       c.status === 'Active',
+      shipToAddresses:  [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(Boolean)
     }));
-
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 🔍 GET /api/orders/:id — fetch a single order’s full details
+router.get('/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+    const order = await Order.findById(id)
+      .populate('customer', 'custCd custName empCdMapped')
+      .lean();
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    res.json(order);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 🔄 PUT /api/orders/:id — update order status (or other fields)
+router.put('/:id', async (req, res, next) => {
+  try {
+    const updates = {};
+    if (req.body.orderStatus) {
+      updates.orderStatus = req.body.orderStatus;
+    }
+    const updated = await Order.findByIdAndUpdate(req.params.id, updates, { new: true });
+    if (!updated) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    res.json(updated);
   } catch (err) {
     next(err);
   }

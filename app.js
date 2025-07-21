@@ -39,6 +39,7 @@ const deliveryRouter         = require('./controllers/deliveryController');
 // ← Import the new Vehicle controller:
 const vehicleRouter          = require('./controllers/vehicleController');
 const stationController = require('./controllers/stationController');
+const invoiceRoutes = require('./routes/invoices');
 
 // 4. Mount under /api
 app.use('/api/auth',                authRouter);
@@ -59,6 +60,7 @@ app.use('/api/drivers',             driverRouter);
 app.use('/api/trips',               tripRouter);
 app.use('/api/deliveries',          deliveryRouter);
 app.use('/api/stations', stationController);
+app.use('/api/invoices', invoiceRoutes);
 
 // 5. Catch-all 404 for anything under /api
 app.use('/api/*', (req, res) => {

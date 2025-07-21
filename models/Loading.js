@@ -1,15 +1,16 @@
-const { Schema, model } = require('mongoose');
+// src/models/Loading.js
+const { Schema, model, models } = require('mongoose');
 
 const LoadingSchema = new Schema({
-  vehicleNo: { type: String, required: true },
-  depotCd: { type: String, required: true },
-  loadingAuthorisationCd: { type: String },
-  loadingSource: { type: String },
-  driverCd: { type: String },
-  productCd: { type: String },
-  loadedQty: { type: Number },
-  date: { type: Date },
-  time: { type: String }
-}, { timestamps: true });
+  tripId:     { type: Schema.Types.ObjectId, ref: 'Trip',     required: true },
+  stationId:  { type: Schema.Types.ObjectId, ref: 'Station',  required: true },
+  product:    { type: String,   required: true },
+  qty:        { type: Number,   required: true },
+  vehicleNo:  { type: String },
+  depotCd:    { type: String }
+}, {
+  timestamps: true
+});
 
-module.exports = model('Loading', LoadingSchema);
+// Avoid OverwriteModelError if you hot-reload or reimport
+module.exports = models.Loading || model('Loading', LoadingSchema);
