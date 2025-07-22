@@ -5,23 +5,11 @@ const router  = express.Router();
 const { body, validationResult } = require('express-validator');
 const pino    = require('pino');
 const mongoose = require('mongoose');
-const requireAuth = require('../middleware/requireAuth');
-const Customer    = require('../models/Customer');
-const Order       = require('../models/Order');
+
+const Customer = require('../models/Customer');
+const Order    = require('../models/Order');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
-
-// 🔐 Protect all routes
-
-
-// 🔒 Allow only sales or admin
-function requireSalesOrAdmin(req, res, next) {
-  const lvl = req.user.accessLevel;
-  if (lvl !== 1 && lvl !== 2) {
-    return res.status(403).json({ error: 'Orders are restricted to sales and administrators' });
-  }
-  next();
-}
 
 // 📥 POST /api/orders — create a new order
 router.post(
@@ -77,7 +65,6 @@ router.post(
     }
   ],
   async (req, res, next) => {
-    const { empCd } = req.user;
     const {
       customerId,
       shipToAddress,
@@ -88,7 +75,6 @@ router.post(
 
     logger.debug({
       route: 'POST /api/orders',
-      user: req.user,
       body: req.body
     });
 
@@ -99,13 +85,10 @@ router.post(
         return res.status(400).json({ error: 'End time must be after start time' });
       }
 
-      // Customer mapping
-      const cust = await Customer.findOne({
-        _id: customerId,
-        empCdMapped: empCd
-      });
+      // Fetch customer (no empCd restriction anymore)
+      const cust = await Customer.findById(customerId);
       if (!cust) {
-        return res.status(403).json({ error: 'Customer not accessible by this employee' });
+        return res.status(404).json({ error: 'Customer not found' });
       }
       if (cust.status !== 'Active') {
         return res.status(400).json({ error: 'Cannot place order for inactive/suspended customer' });
@@ -113,7 +96,6 @@ router.post(
 
       // Save order
       const order = await Order.create({
-        empCd,
         customer:       cust._id,
         shipToAddress,
         items:          items.map(i => ({
@@ -127,13 +109,13 @@ router.post(
       });
 
       res.status(201).json({
-        id:             order._id,
-        customer:       order.customer,
-        shipToAddress:  order.shipToAddress,
-        items:          order.items,
-        deliveryDate:   order.deliveryDate,
+        id:               order._id,
+        customer:         order.customer,
+        shipToAddress:    order.shipToAddress,
+        items:            order.items,
+        deliveryDate:     order.deliveryDate,
         deliveryTimeSlot: order.deliveryTimeSlot,
-        confirmedAt:    order.confirmedAt
+        confirmedAt:      order.confirmedAt
       });
     } catch (err) {
       if (err.name === 'ValidationError' || err.name === 'CastError') {
@@ -157,12 +139,10 @@ router.delete('/:id', async (req, res, next) => {
   }
 });
 
-// 📤 GET /api/orders — list orders for logged-in user
+// 📤 GET /api/orders — list all orders
 router.get('/', async (req, res, next) => {
   try {
-    const { empCd, accessLevel } = req.user;
-    const filter = accessLevel === 2 ? {} : { empCd };
-    const orders = await Order.find(filter)
+    const orders = await Order.find({})
       .populate('customer', 'custCd custName')
       .lean();
 
@@ -182,21 +162,19 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// 👥 GET /api/orders/customers — list accessible customers
+// 👥 GET /api/orders/customers — list all customers
 router.get('/customers', async (req, res, next) => {
   try {
-    const { empCd, accessLevel } = req.user;
-    const filter = accessLevel === 2 ? {} : { empCdMapped: empCd };
-    const custs = await Customer.find(filter).lean();
+    const custs = await Customer.find({}).lean();
 
     const result = custs.map(c => ({
-      id:               c._id,
-      custCd:           c.custCd,
-      custName:         c.custName,
-      status:           c.status,
-      outstandingAmount:c.outstandingAmount,
-      selectable:       c.status === 'Active',
-      shipToAddresses:  [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(Boolean)
+      id:                c._id,
+      custCd:            c.custCd,
+      custName:          c.custName,
+      status:            c.status,
+      outstandingAmount: c.outstandingAmount,
+      selectable:        c.status === 'Active',
+      shipToAddresses:   [c.billToAdd1, c.billToAdd2, c.billToAdd3].filter(Boolean)
     }));
     res.json(result);
   } catch (err) {
@@ -223,13 +201,14 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// 🔄 PUT /api/orders/:id — update order status (or other fields)
+// 🔄 PUT /api/orders/:id — update order fields
 router.put('/:id', async (req, res, next) => {
   try {
     const updates = {};
     if (req.body.orderStatus) {
       updates.orderStatus = req.body.orderStatus;
     }
+    // Add any other fields you want to allow updating
     const updated = await Order.findByIdAndUpdate(req.params.id, updates, { new: true });
     if (!updated) {
       return res.status(404).json({ error: 'Order not found' });
