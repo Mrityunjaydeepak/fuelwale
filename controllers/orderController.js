@@ -12,7 +12,7 @@ const Order       = require('../models/Order');
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 // 🔐 Protect all routes
-router.use(requireAuth);
+
 
 // 🔒 Allow only sales or admin
 function requireSalesOrAdmin(req, res, next) {
@@ -158,7 +158,7 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // 📤 GET /api/orders — list orders for logged-in user
-router.get('/', requireSalesOrAdmin, async (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
     const { empCd, accessLevel } = req.user;
     const filter = accessLevel === 2 ? {} : { empCd };
@@ -183,7 +183,7 @@ router.get('/', requireSalesOrAdmin, async (req, res, next) => {
 });
 
 // 👥 GET /api/orders/customers — list accessible customers
-router.get('/customers', requireSalesOrAdmin, async (req, res, next) => {
+router.get('/customers', async (req, res, next) => {
   try {
     const { empCd, accessLevel } = req.user;
     const filter = accessLevel === 2 ? {} : { empCdMapped: empCd };
