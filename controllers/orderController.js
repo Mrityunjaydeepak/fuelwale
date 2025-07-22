@@ -146,15 +146,19 @@ router.get('/', async (req, res, next) => {
       .populate('customer', 'custCd custName')
       .lean();
 
-    const result = orders.map(o => ({
-      _id:           o._id,
-      salesOrderNo:  o._id.toString().slice(-6),
-      createdAt:     o.createdAt,
-      custCd:        o.customer?.custCd,
-      orderQty:      o.items.reduce((sum, i) => sum + i.quantity, 0),
-      orderType:     o.orderType || 'Regular',
-      orderStatus:   o.orderStatus || 'PENDING'
-    }));
+   const result = orders.map(o => {
+  const items = Array.isArray(o.items) ? o.items : [];
+  return {
+    _id:          o._id,
+    salesOrderNo: o._id.toString().slice(-6),
+    createdAt:    o.createdAt,
+    custCd:       o.customer?.custCd,
+    orderQty:     items.reduce((sum, i) => sum + (i.quantity || 0), 0),
+    orderType:    o.orderType || 'Regular',
+    orderStatus:  o.orderStatus || 'PENDING'
+  };
+});
+
 
     res.json(result);
   } catch (err) {
