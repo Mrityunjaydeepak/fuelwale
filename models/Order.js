@@ -1,7 +1,7 @@
 const { Schema, model } = require('mongoose');
 
 const OrderSchema = new Schema({
-  empCd:            { type: String, required: true },
+  empCd:            { type: String},
   customer:         { type: Schema.Types.ObjectId, ref: 'Customer', required: true },
   shipToAddress:    { type: String, required: true },
   items: [
