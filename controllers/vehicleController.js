@@ -10,11 +10,11 @@ const Vehicle = require('../models/Vehicle');
 
 /**
  * GET /api/vehicles
- * List all vehicles (with depot populated)
+ * List all vehicles (with route populated)
  */
 router.get('/', async (req, res, next) => {
   try {
-    const vehicles = await Vehicle.find().populate('depot');
+    const vehicles = await Vehicle.find().populate('route');
     res.json(vehicles);
   } catch (err) {
     next(err);
@@ -27,7 +27,7 @@ router.get('/', async (req, res, next) => {
  */
 router.get('/:id', async (req, res, next) => {
   try {
-    const vehicle = await Vehicle.findById(req.params.id).populate('depot');
+    const vehicle = await Vehicle.findById(req.params.id).populate('route');
     if (!vehicle) {
       return res.status(404).json({ error: 'Vehicle not found' });
     }
@@ -43,21 +43,39 @@ router.get('/:id', async (req, res, next) => {
  */
 router.post('/', async (req, res, next) => {
   try {
-    const { licensePlate, capacityLiters, depot } = req.body;
-    if (!licensePlate || capacityLiters == null || !depot) {
+    const {
+      vehicleNo,
+      depotCd,
+      brand,
+      model,
+      calibratedCapacity,
+      dipStickYesNo,
+      gpsYesNo,
+      loadSensorYesNo,
+      route
+    } = req.body;
+
+    if (!vehicleNo || !depotCd) {
       return res.status(400).json({
-        error: 'licensePlate, capacityLiters and depot are required'
+        error: 'vehicleNo and depotCd are required'
       });
     }
 
     const vehicle = await Vehicle.create({
-      licensePlate,
-      capacityLiters,
-      depot
+      vehicleNo,
+      depotCd,
+      brand,
+      model,
+      calibratedCapacity,
+      dipStickYesNo,
+      gpsYesNo,
+      loadSensorYesNo,
+      route
     });
+
     res.status(201).json(vehicle);
   } catch (err) {
-    // handle duplicate-key (unique) errors if licensePlate already exists
+    // handle duplicate-key (unique) errors on vehicleNo, etc.
     next(err);
   }
 });
@@ -68,17 +86,34 @@ router.post('/', async (req, res, next) => {
  */
 router.put('/:id', async (req, res, next) => {
   try {
-    const { licensePlate, capacityLiters, depot } = req.body;
+    const {
+      vehicleNo,
+      depotCd,
+      brand,
+      model,
+      calibratedCapacity,
+      dipStickYesNo,
+      gpsYesNo,
+      loadSensorYesNo,
+      route
+    } = req.body;
+
     const updates = {};
-    if (licensePlate != null)   updates.licensePlate   = licensePlate;
-    if (capacityLiters != null) updates.capacityLiters = capacityLiters;
-    if (depot != null)          updates.depot          = depot;
+    if (vehicleNo   != null) updates.vehicleNo          = vehicleNo;
+    if (depotCd     != null) updates.depotCd            = depotCd;
+    if (brand       != null) updates.brand              = brand;
+    if (model       != null) updates.model              = model;
+    if (calibratedCapacity != null) updates.calibratedCapacity = calibratedCapacity;
+    if (dipStickYesNo      != null) updates.dipStickYesNo      = dipStickYesNo;
+    if (gpsYesNo           != null) updates.gpsYesNo           = gpsYesNo;
+    if (loadSensorYesNo    != null) updates.loadSensorYesNo    = loadSensorYesNo;
+    if (route       != null) updates.route              = route;
 
     const updated = await Vehicle.findByIdAndUpdate(
       req.params.id,
       updates,
       { new: true }
-    ).populate('depot');
+    ).populate('route');
 
     if (!updated) {
       return res.status(404).json({ error: 'Vehicle not found' });

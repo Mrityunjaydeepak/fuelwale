@@ -80,9 +80,24 @@ router.get('/:id', async (req, res, next) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Invalid trip ID' });
     }
-    const trip = await Trip.findById(id);
-    if (!trip) return res.status(404).json({ error: 'Trip not found' });
-    res.json(trip);
+
+    // 1) load the trip doc
+    const tripDoc = await Trip.findById(id);
+    if (!tripDoc) {
+      return res.status(404).json({ error: 'Trip not found' });
+    }
+
+    // 2) turn it into a plain object
+    const trip = tripDoc.toObject();
+
+    // 3) fetch the Vehicle record by its vehicleNo string
+    if (trip.vehicleNo) {
+      const veh = await Vehicle.findOne({ vehicleNo: trip.vehicleNo });
+      // veh will have fields: vehicleNo, depotCd, brand, model, calibratedCapacity, etc.
+      trip.vehicle = veh || null;
+    }
+
+    return res.json(trip);
   } catch (err) {
     next(err);
   }
@@ -366,6 +381,7 @@ router.get('/:id/invoice', async (req, res, next) => {
     next(err);
   }
 });
+
 
 /**
  * DELETE /api/trips/:id

@@ -1,64 +1,38 @@
 // controllers/customerController.js
+
 const Customer = require('../models/Customer');
-const Employee = require('../models/Employee');
-const router = require('./userController');
 
-// List customers
-// - Admin (accessLevel 2): all customers
-// - Sales (accessLevel 1): only those mapped to them
-exports.listCustomers = async function(req, res, next) {
+/**
+ * List all customers
+ */
+exports.listCustomers = async (req, res, next) => {
   try {
-    const { empCd, accessLevel } = req.user;
-    const filter = accessLevel === 2
-      ? {}
-      : { empCdMapped: empCd };
-
-    const customers = await Customer.find(filter).lean();
-    const result = customers.map(c => ({
-      id:                c._id,
-      custCd:            c.custCd,
-      custName:          c.custName,
-      status:            c.status,
-      outstandingAmount: c.outstandingAmount,
-      selectable:        c.status === 'Active',
-      shipToAddresses:   [c.billToAdd1, c.billToAdd2, c.billToAdd3]
-                            .filter(a => !!a)
-    }));
-
-    res.json(result);
+    const customers = await Customer.find();
+    res.json(customers);
   } catch (err) {
     next(err);
   }
 };
 
-// Get one customer by ID
-// - Only admins or the employee it is mapped to
-exports.getCustomer = async function(req, res, next) {
+/**
+ * Fetch one customer by ID
+ */
+exports.getCustomer = async (req, res, next) => {
   try {
-    const { empCd, accessLevel } = req.user;
-    const customer = await Customer.findById(req.params.id).lean();
+    const customer = await Customer.findById(req.params.id);
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    if (accessLevel !== 2 && customer.empCdMapped !== empCd) {
-      return res.status(403).json({ error: 'Not authorized for this customer' });
-    }
-    res.json({
-      id:                customer._id,
-      custCd:            customer.custCd,
-      custName:          customer.custName,
-      status:            customer.status,
-      outstandingAmount: customer.outstandingAmount,
-      shipToAddresses:   [customer.billToAdd1, customer.billToAdd2, customer.billToAdd3]
-                            .filter(a => !!a)
-    });
+    res.json(customer);
   } catch (err) {
     next(err);
   }
 };
 
-// Create a new customer (admin only)
-exports.createCustomer = async function(req, res, next) {
+/**
+ * Create a new customer
+ */
+exports.createCustomer = async (req, res, next) => {
   try {
     const {
       depotCd,
@@ -69,84 +43,122 @@ exports.createCustomer = async function(req, res, next) {
       billToAdd1,
       billToAdd2,
       billToAdd3,
-      area,
-      city,
-      pin,
-      stateCd,
+      billArea,
+      billCity,
+      billPin,
+      billStateCd,
+      shipTo1Add1,
+      shipTo1Add2,
+      shipTo1Add3,
+      shipTo1Area,
+      shipTo1City,
+      shipTo1Pin,
+      shipTo1StateCd,
+      shipTo2Add1,
+      shipTo2Add2,
+      shipTo2Add3,
+      shipTo2Area,
+      shipTo2City,
+      shipTo2Pin,
+      shipTo2StateCd,
+      custGST,
+      custPAN,
+      custPeso,
+      tradeLicNo,
       status,
+      agreement,
+      validity,
+      contactPerson,
+      mobileNo
     } = req.body;
 
-    // 1) Require empCdMapped
-    if (!empCdMapped) {
-      return res
-        .status(400)
-        .json({ error: 'empCdMapped is required when creating a customer' });
+    // Validate required
+    if (!depotCd || !custName || !custCd) {
+      return res.status(400).json({
+        error: 'depotCd, custName and custCd are required'
+      });
     }
 
-    // 2) Validate it refers to an existing Employee
-    const emp = await Employee.findOne({ empCd: empCdMapped });
-    if (!emp) {
-      return res
-        .status(400)
-        .json({ error: `No employee found with empCd='${empCdMapped}'` });
-    }
-
-    // 3) Create the customer
-    const newCustomer = await Customer.create({
+    const customer = await Customer.create({
       depotCd,
       custName,
       custCd,
-      empCdMapped,    // guaranteed valid
+      empCdMapped,
       routeCdMapped,
       billToAdd1,
       billToAdd2,
       billToAdd3,
-      area,
-      city,
-      pin,
-      stateCd,
-      status
+      billArea,
+      billCity,
+      billPin,
+      billStateCd,
+      shipTo1Add1,
+      shipTo1Add2,
+      shipTo1Add3,
+      shipTo1Area,
+      shipTo1City,
+      shipTo1Pin,
+      shipTo1StateCd,
+      shipTo2Add1,
+      shipTo2Add2,
+      shipTo2Add3,
+      shipTo2Area,
+      shipTo2City,
+      shipTo2Pin,
+      shipTo2StateCd,
+      custGST,
+      custPAN,
+      custPeso,
+      tradeLicNo,
+      status,
+      agreement,
+      validity,
+      contactPerson,
+      mobileNo
     });
 
-    res.status(201).json(newCustomer);
+    res.status(201).json(customer);
   } catch (err) {
     next(err);
   }
 };
 
-// Update an existing customer (admin only)
-exports.updateCustomer = async function(req, res, next) {
+/**
+ * Update an existing customer
+ */
+exports.updateCustomer = async (req, res, next) => {
   try {
-    const updates = { ...req.body };
-
-    // 1) If updating empCdMapped, validate it
-    if (updates.empCdMapped) {
-      const emp = await Employee.findOne({ empCd: updates.empCdMapped });
-      if (!emp) {
-        return res
-          .status(400)
-          .json({ error: `No employee found with empCd='${updates.empCdMapped}'` });
-      }
+    const updates = {};
+    for (let key of [
+      'depotCd','custName','custCd','empCdMapped','routeCdMapped',
+      'billToAdd1','billToAdd2','billToAdd3','billArea','billCity','billPin','billStateCd',
+      'shipTo1Add1','shipTo1Add2','shipTo1Add3','shipTo1Area','shipTo1City','shipTo1Pin','shipTo1StateCd',
+      'shipTo2Add1','shipTo2Add2','shipTo2Add3','shipTo2Area','shipTo2City','shipTo2Pin','shipTo2StateCd',
+      'custGST','custPAN','custPeso','tradeLicNo','status','agreement','validity',
+      'contactPerson','mobileNo'
+    ]) {
+      if (req.body[key] != null) updates[key] = req.body[key];
     }
 
-    // 2) Apply update
-    const updated = await Customer.findByIdAndUpdate(
+    const customer = await Customer.findByIdAndUpdate(
       req.params.id,
       updates,
-      { new: true }
-    ).lean();
+      { new: true, runValidators: true }
+    );
 
-    if (!updated) {
+    if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    res.json(updated);
+    res.json(customer);
   } catch (err) {
     next(err);
   }
 };
 
-// Delete a customer (admin only)
-exports.deleteCustomer = async function(req, res, next) {
+/**
+ * Remove a customer
+ */
+exports.deleteCustomer = async (req, res, next) => {
   try {
     const deleted = await Customer.findByIdAndDelete(req.params.id);
     if (!deleted) {
@@ -157,5 +169,3 @@ exports.deleteCustomer = async function(req, res, next) {
     next(err);
   }
 };
-
-
