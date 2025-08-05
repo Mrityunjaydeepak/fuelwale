@@ -2,7 +2,7 @@
 
 const pino    = require('pino');
 const Order   = require('../models/Order');
-const Invoice = require('../models/invoice');
+const Invoice = require('../models/Invoice');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
