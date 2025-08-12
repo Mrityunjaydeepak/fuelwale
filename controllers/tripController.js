@@ -5,8 +5,8 @@ const mongoose       = require('mongoose');
 const PDFDocument    = require('pdfkit');
 const fs             = require('fs');
 const path           = require('path');
-const numberToWords  = require('number-to-words');     // npm i number-to-words
-const QRCode         = require('qrcode');               // npm i qrcode
+const numberToWords  = require('number-to-words');
+const QRCode         = require('qrcode');
 const router         = express.Router();
 
 const Trip           = require('../models/Trip');
@@ -35,14 +35,14 @@ function extractTripPrefix(tn) {
   return s.replace(/(\d+)\s*$/, '');
 }
 async function getNextTripSerialString() {
+  // First call after upsert will set seq from -1 -> 0
   const doc = await Counter.findOneAndUpdate(
     { _id: 'tripSerial' },
-    { $inc: { seq: 1 } },
+    { $setOnInsert: { seq: -1 }, $inc: { seq: 1 } },
     { new: true, upsert: true }
   ).lean();
-  const n = doc?.seq ?? 1;
-  const width = Math.max(3, String(n).length);
-  return String(n).padStart(width, '0');
+  const n = doc.seq; // 0, 1, 2, ...
+  return String(n % 1000).padStart(3, '0'); // always 3 digits
 }
 async function finalizeTripNo(clientTripNo) {
   const prefix = extractTripPrefix(clientTripNo);
@@ -51,27 +51,49 @@ async function finalizeTripNo(clientTripNo) {
 }
 
 /**
- * Backfill helper for legacy trips created before tripNo/orderId were required.
+ * Backfill for legacy trips:
+ * - Try to set missing orderId from DeliveryPlan
+ * - Generate tripNo if missing
+ * - If orderId is still missing, only persist tripNo via raw update (skip validators)
+ * - If orderId is present, save normally (validators ok)
  */
 async function backfillTripIfNeeded(trip) {
-  let changed = false;
+  const updates = {};
 
   if (!trip.orderId) {
     const dp = await DeliveryPlan.findOne({ tripId: trip._id }, 'orderId').lean();
-    if (dp?.orderId) {
-      trip.orderId = dp.orderId;
-      changed = true;
-    }
+    if (dp?.orderId) updates.orderId = dp.orderId;
   }
 
   if (!trip.tripNo) {
     const prefix = '000000';
     const serial = await getNextTripSerialString();
-    trip.tripNo = `${prefix}${serial}`;
-    changed = true;
+    updates.tripNo = `${prefix}${serial}`;
   }
 
-  if (changed) await trip.save();
+  if (!Object.keys(updates).length) return trip;
+
+  // Case A: still no orderId → set tripNo silently via updateOne (no validators)
+  if (!updates.orderId && !trip.orderId && updates.tripNo) {
+    await Trip.updateOne({ _id: trip._id }, { $set: { tripNo: updates.tripNo } }, { runValidators: false });
+    trip.tripNo = updates.tripNo;
+    return trip;
+  }
+
+  // Case B: we have orderId → normal save
+  if (updates.orderId) trip.orderId = updates.orderId;
+  if (updates.tripNo)  trip.tripNo  = updates.tripNo;
+  await trip.save();
+  return trip;
+}
+
+// safer wrapper so one bad document doesn't break list endpoints
+async function safeBackfill(trip) {
+  try {
+    if (!trip.tripNo || !trip.orderId) await backfillTripIfNeeded(trip);
+  } catch (e) {
+    console.warn('Backfill failed for trip', String(trip?._id || ''), e?.message || e);
+  }
   return trip;
 }
 
@@ -79,13 +101,9 @@ function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Find a vehicle by vehicleNo (case-insensitive fallback) and
- * normalize depot under vehicle.depot.depotCd.
- */
+/** Load vehicle and normalize depot */
 async function loadVehicleWithDepot(vehicleNo) {
   if (!vehicleNo) return null;
-
   let veh = await Vehicle.findOne({ vehicleNo }).lean();
   if (!veh) {
     const pat = new RegExp(`^${escapeRegExp(vehicleNo)}$`, 'i');
@@ -103,25 +121,13 @@ async function loadVehicleWithDepot(vehicleNo) {
 const inrFmt = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 });
 function inr(n) { return inrFmt.format(Number(n || 0)); }
 function exists(p) { try { return p && fs.existsSync(p); } catch { return false; } }
-
-// Styled cell drawing (borders like your template)
 function cell(doc, x, y, w, h, text, opts = {}) {
-  const {
-    align = 'left', bold = false, size = 10, fill = null,
-    stroke = '#000', padding = 6
-  } = opts;
-
-  if (fill) {
-    doc.save().fillColor(fill).rect(x, y, w, h).fill().restore();
-  }
-  if (stroke) {
-    doc.save().lineWidth(0.6).strokeColor(stroke).rect(x, y, w, h).stroke().restore();
-  }
-
+  const { align = 'left', bold = false, size = 10, fill = null, stroke = '#000', padding = 6 } = opts;
+  if (fill) doc.save().fillColor(fill).rect(x, y, w, h).fill().restore();
+  if (stroke) doc.save().lineWidth(0.6).strokeColor(stroke).rect(x, y, w, h).stroke().restore();
   doc.fontSize(size);
   if (bold) doc.font('Helvetica-Bold'); else doc.font('Helvetica');
   doc.fillColor('#000');
-
   if (text != null) {
     doc.text(String(text), x + padding, y + padding, {
       width: w - padding * 2,
@@ -134,59 +140,76 @@ function cell(doc, x, y, w, h, text, opts = {}) {
 // Protect all routes
 router.use(requireAuth);
 
-/**
- * GET /api/trips
- */
+/** Admin: reset serial so next = 000 */
+router.post('/reset-serial', async (req, res, next) => {
+  try {
+    await Counter.findOneAndUpdate(
+      { _id: 'tripSerial' },
+      { $set: { seq: -1 } },
+      { upsert: true }
+    );
+    res.json({ ok: true, nextWillBe: '000' });
+  } catch (err) { next(err); }
+});
+
+/** GET /api/trips */
 router.get('/', async (req, res, next) => {
   try {
     const trips = await Trip.find();
-    for (const t of trips) if (!t.tripNo || !t.orderId) await backfillTripIfNeeded(t);
-    res.json(trips.map(t => t.toObject()));
+    const out = [];
+    for (const t of trips) {
+      await safeBackfill(t);
+      out.push(t.toObject());
+    }
+    res.json(out);
   } catch (err) { next(err); }
 });
 
-/**
- * GET /api/trips/assigned/:driverId
- */
+/** GET /api/trips/assigned/:driverId */
 router.get('/assigned/:driverId', async (req, res, next) => {
   try {
     const { driverId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(driverId)) return res.status(400).json({ error: 'Invalid driverId' });
+    if (!mongoose.Types.ObjectId.isValid(driverId)) {
+      return res.status(400).json({ error: 'Invalid driverId' });
+    }
     const docs = await Trip.find({ driverId, status: 'ASSIGNED' }).sort({ createdAt: 1 });
-    for (const t of docs) if (!t.tripNo || !t.orderId) await backfillTripIfNeeded(t);
-    res.json(docs.map(d => d.toObject()));
+    const out = [];
+    for (const t of docs) {
+      await safeBackfill(t);
+      out.push(t.toObject());
+    }
+    res.json(out);
   } catch (err) { next(err); }
 });
 
-/**
- * GET /api/trips/active/:driverId
- */
+/** GET /api/trips/active/:driverId */
 router.get('/active/:driverId', async (req, res, next) => {
   try {
     const { driverId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(driverId)) return res.status(400).json({ error: 'Invalid driverId' });
+    if (!mongoose.Types.ObjectId.isValid(driverId)) {
+      return res.status(400).json({ error: 'Invalid driverId' });
+    }
     const trip = await Trip.findOne({ driverId, status: 'ACTIVE' });
     if (!trip) return res.status(404).json({ error: 'No active trip found' });
-    if (!trip.tripNo || !trip.orderId) await backfillTripIfNeeded(trip);
+    await safeBackfill(trip);
     res.json(trip.toObject());
   } catch (err) { next(err); }
 });
 
-/**
- * GET /api/trips/:id
- * — returns trip + vehicle + driverName + routeName
- */
+/** GET /api/trips/:id — returns trip + vehicle + driverName + routeName */
 router.get('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid trip ID' });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid trip ID' });
+    }
 
     const trip = await Trip.findById(id)
       .populate('driverId', 'name driverName')
       .populate('routeId',  'name routeName');
 
     if (!trip) return res.status(404).json({ error: 'Trip not found' });
-    if (!trip.tripNo || !trip.orderId) await backfillTripIfNeeded(trip);
+    await safeBackfill(trip);
 
     const out = trip.toObject();
     out.driverName = trip.driverId ? (trip.driverId.name ?? trip.driverId.driverName ?? null) : null;
@@ -197,31 +220,38 @@ router.get('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/**
- * POST /api/trips/assign
- */
+/** POST /api/trips/assign — trust client tripNo; enforce uniqueness */
 router.post('/assign', async (req, res, next) => {
   try {
     const { tripNo, driverId, vehicleNo, capacity, routeId, orderId } = req.body;
 
     if (!tripNo || !driverId || !vehicleNo || capacity == null || !routeId || !orderId) {
-      return res.status(400).json({ error: 'tripNo, driverId, vehicleNo, capacity, routeId & orderId are required' });
+      return res.status(400).json({
+        error: 'tripNo, driverId, vehicleNo, capacity, routeId & orderId are required'
+      });
     }
-    if (!mongoose.Types.ObjectId.isValid(orderId)) return res.status(400).json({ error: 'Invalid orderId' });
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({ error: 'Invalid orderId' });
+    }
 
     const o = await Order.findOne({ _id: orderId, orderStatus: 'PENDING' });
     if (!o) return res.status(400).json({ error: 'Order not found or not pending' });
 
-    const finalTripNo = await finalizeTripNo(tripNo);
+    const wantedTripNo = String(tripNo).trim();
+
+    const existing = await Trip.findOne({ tripNo: wantedTripNo }).lean();
+    if (existing) {
+      return res.status(409).json({ error: 'Trip number already exists' });
+    }
 
     const trip = await Trip.create({
-      tripNo: finalTripNo,
+      tripNo:   wantedTripNo,
       orderId,
       driverId,
       vehicleNo,
       capacity,
       routeId,
-      status: 'ASSIGNED',
+      status:   'ASSIGNED',
       assigned: true
     });
 
@@ -250,18 +280,18 @@ router.post('/assign', async (req, res, next) => {
       tripNo:                trip.tripNo,
       seededDeliveriesCount: 1
     });
-
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err?.code === 11000 && err?.keyPattern?.tripNo) {
+      return res.status(409).json({ error: 'Trip number already exists' });
+    }
+    next(err);
+  }
 });
 
-/**
- * POST /api/trips/login
- */
+/** POST /api/trips/login */
 router.post('/login', async (req, res, next) => {
   try {
-    const {
-      tripId, driverId, vehicleNo, startKm, totalizerStart, routeId, remarks
-    } = req.body;
+    const { tripId, driverId, vehicleNo, startKm, totalizerStart, routeId, remarks } = req.body;
 
     if (!driverId || !vehicleNo || startKm == null || totalizerStart == null || !routeId) {
       return res.status(400).json({
@@ -276,7 +306,7 @@ router.post('/login', async (req, res, next) => {
     if (!trip) trip = await Trip.findOne({ driverId, vehicleNo, status: 'ASSIGNED' });
     if (!trip) return res.status(403).json({ error: 'No assigned trip to start. Please check back later.' });
 
-    if (!trip.tripNo || !trip.orderId) await backfillTripIfNeeded(trip);
+    await safeBackfill(trip);
 
     trip.startKm        = startKm;
     trip.totalizerStart = totalizerStart;
@@ -298,9 +328,7 @@ router.post('/login', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/**
- * POST /api/trips/logout
- */
+/** POST /api/trips/logout */
 router.post('/logout', async (req, res, next) => {
   try {
     const { tripId, endKm, totalizerEnd } = req.body;
@@ -313,7 +341,7 @@ router.post('/logout', async (req, res, next) => {
       return res.status(400).json({ error: 'No active trip found to end' });
     }
 
-    if (!trip.tripNo || !trip.orderId) await backfillTripIfNeeded(trip);
+    await safeBackfill(trip);
 
     trip.endKm        = endKm;
     trip.totalizerEnd = totalizerEnd;
@@ -355,15 +383,14 @@ router.post('/logout', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/**
- * GET /api/trips/:id/invoice
- * — Styled like your provided template
- */
+/** GET /api/trips/:id/invoice */
 router.get('/:id/invoice', async (req, res, next) => {
   try {
     const { id: tripId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(tripId)) {
+      return res.status(400).json({ error: 'Invalid trip ID' });
+    }
 
-    // Load data
     const trip = await Trip.findById(tripId).lean();
     if (!trip) return res.status(404).json({ error: 'Trip not found' });
 
@@ -376,7 +403,7 @@ router.get('/:id/invoice', async (req, res, next) => {
       return res.status(404).json({ error: 'No deliveries found for this trip' });
     }
 
-    // Company branding (override via env to match your header)
+    // Company branding (env overrides supported)
     const COMPANY = {
       titleTop:  'Delivery cum Sales Invoice',
       name:     process.env.COMPANY_NAME    || 'SHREENATH PETROLEUM',
@@ -387,21 +414,18 @@ router.get('/:id/invoice', async (req, res, next) => {
       web:      process.env.COMPANY_WEB     || 'www.fuelwale.com'
     };
 
-    const logoLeft   = path.join(process.cwd(), 'assets', 'logo_left.png'); // fuelwale logo
+    const logoLeft   = path.join(process.cwd(), 'assets', 'logo_left.png');
     const imgNozzle  = path.join(process.cwd(), 'assets', 'nozzle.png');
     const imgSign    = path.join(process.cwd(), 'assets', 'sign.png');
     const imgStamp   = path.join(process.cwd(), 'assets', 'stamp.png');
 
-    // Invoice meta
     const todayStr   = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
     const invoiceNo  = `INV${(trip.tripNo || '').replace(/\D/g, '').padStart(6,'0') || Date.now().toString().slice(-9)}`;
 
-    // Customer / order context: take first delivery as the header source
     const first      = deliveries[0];
     const customer   = first.customerId || {};
     const order      = first.orderId || {};
 
-    // Map fields to your template’s labels
     const gridLeft = [
       ['Party Name:',   customer.custName || '—'],
       ['Address:',      (customer.address || first.shipTo || '—')],
@@ -422,7 +446,6 @@ router.get('/:id/invoice', async (req, res, next) => {
       ['Credit Period:', (order.creditDays != null ? `${order.creditDays} Days` : '1 Days')]
     ];
 
-    // Rows for "Description of Goods"
     const rows = deliveries.map((d) => {
       const qty   = Number(d.qty || 0);
       const rate  = Number(d.rate || 0);
@@ -439,7 +462,7 @@ router.get('/:id/invoice', async (req, res, next) => {
     const totalQty   = rows.reduce((s, r) => s + (r.qty || 0), 0);
     const subTotal   = rows.reduce((s, r) => s + (r.amount || 0), 0);
 
-    // Build PDF
+    // PDF
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="invoice_${tripId}.pdf"`);
 
@@ -447,22 +470,18 @@ router.get('/:id/invoice', async (req, res, next) => {
     doc.pipe(res);
 
     const pageWidth  = doc.page.width;
-    const contentW   = pageWidth - 72;          // margin left(36)+right(36)
+    const contentW   = pageWidth - 72;
     const leftX      = 36;
 
-    // Title
     doc.font('Helvetica').fontSize(14).text(COMPANY.titleTop, 0, 18, { align: 'center' });
 
-    // Header box
     const headerY = 36;
     const headerH = 110;
-    cell(doc, leftX, headerY, contentW, headerH, null); // outer border
+    cell(doc, leftX, headerY, contentW, headerH, null);
 
-    // Logos
     if (exists(logoLeft))  doc.image(logoLeft, leftX + 8, headerY + 8, { width: 110, height: 90, fit: [110, 90] });
     if (exists(imgNozzle)) doc.image(imgNozzle, leftX + contentW - 120, headerY + 10, { width: 80 });
 
-    // Company name (center-ish)
     doc.font('Helvetica-Bold').fontSize(18).fillColor('#C00000')
        .text(COMPANY.name, leftX, headerY + 12, { width: contentW, align: 'center' });
     doc.font('Helvetica-Bold').fontSize(12).fillColor('#000')
@@ -473,28 +492,24 @@ router.get('/:id/invoice', async (req, res, next) => {
       .text(`${COMPANY.phone} | ${COMPANY.email}`, leftX, headerY + 68, { width: contentW, align: 'center' })
       .text(COMPANY.web, leftX, headerY + 82, { width: contentW, align: 'center' });
 
-    // Details grid (like the two-column table in your image)
     let gy = headerY + headerH + 6;
     const rowH = 22;
     const colWLeftKey = 90;
     const colWLeftVal = 220;
     const colWRightKey = 90;
-    const colWRightVal = contentW - (colWLeftKey + colWLeftVal + colWRightKey) - 2; // 2 for the gutter lines
+    const colWRightVal = contentW - (colWLeftKey + colWLeftVal + colWRightKey) - 2;
     const gridRows = Math.max(gridLeft.length, gridRight.length);
 
     for (let i = 0; i < gridRows; i++) {
       const y = gy + i * rowH;
-      // left pair
       cell(doc, leftX, y, colWLeftKey, rowH, gridLeft[i]?.[0] || '', { bold: true });
       cell(doc, leftX + colWLeftKey, y, colWLeftVal, rowH, gridLeft[i]?.[1] || '');
-      // right pair
       const rightStart = leftX + colWLeftKey + colWLeftVal;
       cell(doc, rightStart, y, colWRightKey, rowH, gridRight[i]?.[0] || '', { bold: true });
       cell(doc, rightStart + colWRightKey, y, colWRightVal, rowH, gridRight[i]?.[1] || '');
     }
     const gridBottomY = gy + gridRows * rowH;
 
-    // Items table header
     const itemsHeaderY = gridBottomY + 8;
     const cDesc = 240, cQty = 100, cPer = 80, cRate = 80, cAmt = contentW - (cDesc + cQty + cPer + cRate);
     cell(doc, leftX, itemsHeaderY, contentW, 22, null, { fill: '#e5f1ff' });
@@ -504,7 +519,6 @@ router.get('/:id/invoice', async (req, res, next) => {
     cell(doc, leftX + cDesc + cQty + cPer, itemsHeaderY, cRate, 22, 'Unit Rate', { bold: true, align: 'right' });
     cell(doc, leftX + cDesc + cQty + cPer + cRate, itemsHeaderY, cAmt, 22, 'Amount', { bold: true, align: 'right' });
 
-    // Item rows
     let iy = itemsHeaderY + 22;
     rows.forEach(r => {
       cell(doc, leftX, iy, cDesc, 22, r.desc);
@@ -515,35 +529,28 @@ router.get('/:id/invoice', async (req, res, next) => {
       iy += 22;
     });
 
-    // Totals row (bold)
     cell(doc, leftX, iy, cDesc, 22, 'Total Amount', { bold: true });
     cell(doc, leftX + cDesc, iy, cQty, 22, String(totalQty), { bold: true, align: 'right' });
     cell(doc, leftX + cDesc + cQty, iy, cPer, 22, 'Liter', { align: 'center', bold: true });
-    cell(doc, leftX + cDesc + cQty + cPer, iy, cRate, 22, '', { });
+    cell(doc, leftX + cDesc + cQty + cPer, iy, cRate, 22, '', {});
     cell(doc, leftX + cDesc + cQty + cPer + cRate, iy, cAmt, 22, inr(subTotal), { bold: true, align: 'right' });
 
-    // Receiver / Bank / Authorized block (3 columns)
-    const blockY      = iy + 14;
-    const blockH      = 140;
-    const colA        = 180;  // Receiver's Sign
-    const colB        = 240;  // Bank Details + QR
-    const colC        = contentW - (colA + colB); // For, Authorized Sign
+    const blockY = iy + 14;
+    const blockH = 140;
+    const colA   = 180;
+    const colB   = 240;
+    const colC   = contentW - (colA + colB);
 
-    // Outer frame
     cell(doc, leftX, blockY, contentW, blockH, null);
-
-    // Column separator lines
     cell(doc, leftX, blockY, colA, blockH, null);
     cell(doc, leftX + colA, blockY, colB, blockH, null);
     cell(doc, leftX + colA + colB, blockY, colC, blockH, null);
 
-    // Left column: Receiver's Sign
     doc.font('Helvetica-Bold').fontSize(11).text("Receiver's Sign.", leftX + 8, blockY + 8);
-    if (exists(imgSign)) {
-      doc.image(imgSign, leftX + 20, blockY + 32, { width: 110, height: 60, fit: [110, 60] });
-    }
+    const imgSignPath  = path.join(process.cwd(), 'assets', 'sign.png');
+    const imgStampPath = path.join(process.cwd(), 'assets', 'stamp.png');
+    if (exists(imgSignPath))  doc.image(imgSignPath, leftX + 20, blockY + 32, { width: 110, height: 60, fit: [110, 60] });
 
-    // Middle column: Bank details + QR
     const bankX = leftX + colA + 8;
     const bankY = blockY + 8;
     const bank = {
@@ -561,8 +568,7 @@ router.get('/:id/invoice', async (req, res, next) => {
       .text(`IFSC: ${bank.ifsc}`, bankX, bankY + 58)
       .text(`Branch: ${bank.branch}`, bankX, bankY + 72);
 
-    // QR code (upi payment)
-    const qrPayload = process.env.UPI_QR_VALUE || ''; // e.g. 'upi://pay?pa=your@upi&pn=Shreenath%20Petroleum&am=0&cu=INR'
+    const qrPayload = process.env.UPI_QR_VALUE || '';
     if (qrPayload) {
       try {
         const buf = await QRCode.toBuffer(qrPayload, { width: 110, margin: 0 });
@@ -571,14 +577,12 @@ router.get('/:id/invoice', async (req, res, next) => {
       } catch {}
     }
 
-    // Right column: For, Company + Authorized Sign
     const rightX = leftX + colA + colB + 8;
     doc.font('Helvetica').fontSize(10).text('For,', rightX, blockY + 8);
     doc.font('Helvetica-Bold').fontSize(11).text(`${COMPANY.name} ${COMPANY.suffix ? 'PVT LTD' : ''}`, rightX + 20, blockY + 8);
-    if (exists(imgStamp)) doc.image(imgStamp, rightX + 20, blockY + 28, { width: 110, height: 110, fit: [110, 110], opacity: 0.9 });
+    if (exists(imgStampPath)) doc.image(imgStampPath, rightX + 20, blockY + 28, { width: 110, height: 110, fit: [110, 110], opacity: 0.9 });
     doc.font('Helvetica').fontSize(10).text('Authorized Sign.', rightX + 10, blockY + blockH - 20);
 
-    // Notes bar at bottom
     const notesY = blockY + blockH + 10;
     cell(doc, leftX, notesY, contentW, 36, null);
     doc.font('Helvetica-Bold').fontSize(10).text('Note:-', leftX + 8, notesY + 8);
@@ -589,10 +593,8 @@ router.get('/:id/invoice', async (req, res, next) => {
     doc.font('Helvetica').fontSize(9).fillColor('#C00000').text('Thank You for your business', leftX + 4, notesY + 24);
     doc.fillColor('#000');
 
-    // Amount in words (optional extra, below totals)
     const amountWords = numberToWords.toWords(Math.round(subTotal)).replace(/,/g, '');
-    doc.font('Helvetica').fontSize(9)
-      .text(`Amount in words: Rupees ${amountWords} only`, leftX, itemsHeaderY - 14);
+    doc.font('Helvetica').fontSize(9).text(`Amount in words: Rupees ${amountWords} only`, leftX, itemsHeaderY - 14);
 
     doc.end();
   } catch (err) {
@@ -600,12 +602,14 @@ router.get('/:id/invoice', async (req, res, next) => {
   }
 });
 
-/**
- * DELETE /api/trips/:id
- */
+/** DELETE /api/trips/:id */
 router.delete('/:id', async (req, res, next) => {
   try {
-    const deleted = await Trip.findByIdAndDelete(req.params.id);
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid trip ID' });
+    }
+    const deleted = await Trip.findByIdAndDelete(id);
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     res.json({ deleted: true });
   } catch (err) { next(err); }
