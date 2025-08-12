@@ -39,7 +39,7 @@ const CustomerSchema = new Schema({
   billArea:       { type: String, maxlength: 30, trim: true },
   billCity:       { type: String, maxlength: 20, trim: true },
   billPin:        { type: Number },
-  billStateCd:    { type: String, maxlength: 2, trim: true },
+  billStateCd:    { type: Number, maxlength: 2, trim: true },
 
   // Shipping address 1
   shipTo1Add1:    { type: String, maxlength: 30, trim: true },

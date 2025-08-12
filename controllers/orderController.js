@@ -1,10 +1,10 @@
 // controllers/orderController.js
 
-const express = require('express');
-const router  = express.Router();
+const express           = require('express');
+const router            = express.Router();
 const { body, validationResult } = require('express-validator');
-const pino    = require('pino');
-const mongoose = require('mongoose');
+const pino              = require('pino');
+const mongoose          = require('mongoose');
 
 const Customer = require('../models/Customer');
 const Order    = require('../models/Order');
@@ -85,7 +85,7 @@ router.post(
         return res.status(400).json({ error: 'End time must be after start time' });
       }
 
-      // Fetch customer (no empCd restriction anymore)
+      // Fetch and validate customer
       const cust = await Customer.findById(customerId);
       if (!cust) {
         return res.status(404).json({ error: 'Customer not found' });
@@ -94,7 +94,7 @@ router.post(
         return res.status(400).json({ error: 'Cannot place order for inactive/suspended customer' });
       }
 
-      // Save order
+      // Create order
       const order = await Order.create({
         customer:       cust._id,
         shipToAddress,
@@ -108,15 +108,7 @@ router.post(
         confirmedAt:    new Date()
       });
 
-      res.status(201).json({
-        id:               order._id,
-        customer:         order.customer,
-        shipToAddress:    order.shipToAddress,
-        items:            order.items,
-        deliveryDate:     order.deliveryDate,
-        deliveryTimeSlot: order.deliveryTimeSlot,
-        confirmedAt:      order.confirmedAt
-      });
+      res.status(201).json(order);
     } catch (err) {
       if (err.name === 'ValidationError' || err.name === 'CastError') {
         return res.status(400).json({ error: err.message });
@@ -139,28 +131,14 @@ router.delete('/:id', async (req, res, next) => {
   }
 });
 
-// 📤 GET /api/orders — list all orders
+// 📤 GET /api/orders — list all orders (full details!)
 router.get('/', async (req, res, next) => {
   try {
     const orders = await Order.find({})
-      .populate('customer', 'custCd custName')
+      .populate('customer', 'custCd custName stateCd depotCd')  // <-- include stateCd & depotCd
       .lean();
 
-   const result = orders.map(o => {
-  const items = Array.isArray(o.items) ? o.items : [];
-  return {
-    _id:          o._id,
-    salesOrderNo: o._id.toString().slice(-6),
-    createdAt:    o.createdAt,
-    custCd:       o.customer?.custCd,
-    orderQty:     items.reduce((sum, i) => sum + (i.quantity || 0), 0),
-    orderType:    o.orderType || 'Regular',
-    orderStatus:  o.orderStatus || 'PENDING'
-  };
-});
-
-
-    res.json(result);
+    res.json(orders);
   } catch (err) {
     next(err);
   }
@@ -170,7 +148,6 @@ router.get('/', async (req, res, next) => {
 router.get('/customers', async (req, res, next) => {
   try {
     const custs = await Customer.find({}).lean();
-
     const result = custs.map(c => ({
       id:                c._id,
       custCd:            c.custCd,
@@ -194,7 +171,7 @@ router.get('/:id', async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid order ID' });
     }
     const order = await Order.findById(id)
-      .populate('customer', 'custCd custName empCdMapped')
+      .populate('customer', 'custCd custName empCdMapped stateCd depotCd')
       .lean();
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -212,7 +189,7 @@ router.put('/:id', async (req, res, next) => {
     if (req.body.orderStatus) {
       updates.orderStatus = req.body.orderStatus;
     }
-    // Add any other fields you want to allow updating
+    // Add other updatable fields if needed…
     const updated = await Order.findByIdAndUpdate(req.params.id, updates, { new: true });
     if (!updated) {
       return res.status(404).json({ error: 'Order not found' });

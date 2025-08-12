@@ -17,8 +17,10 @@
     "express-validator": "^7.2.1",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.15.0",
+    "number-to-words": "^1.2.4",
     "pdfkit": "^0.17.1",
-    "pino": "^9.7.0"
+    "pino": "^9.7.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "nodemon": "^2.0.22"

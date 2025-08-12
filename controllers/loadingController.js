@@ -9,6 +9,7 @@ const Loading         = require('../models/Loading');
 const BowserInventory = require('../models/BowserInventory');
 const Trip            = require('../models/Trip');
 const requireAuth     = require('../middleware/requireAuth');
+const Vehicle = require('../models/Vehicle');
 
 router.use(requireAuth);
 
@@ -187,9 +188,13 @@ router.post('/verify-code', async (req, res, next) => {
  * POST /api/loadings
  * Record a loading fill and update inventory.
  */
+
+
+
 router.post('/', async (req, res, next) => {
   try {
-    const { tripId, code, stationId, product, qty } = req.body;
+    const { tripId, code, stationId, product, qty, vehicleId } = req.body;
+
     if (!tripId || !stationId || !product || qty == null) {
       return res.status(400).json({
         error: 'tripId, stationId, product, and qty are required'
@@ -201,19 +206,18 @@ router.post('/', async (req, res, next) => {
     ) {
       return res.status(400).json({ error: 'Invalid tripId or stationId' });
     }
+    if (vehicleId && !mongoose.Types.ObjectId.isValid(vehicleId)) {
+      return res.status(400).json({ error: 'Invalid vehicleId' });
+    }
 
     // 1) Fetch trip
     const trip = await Trip.findById(tripId);
-    if (!trip) {
-      return res.status(404).json({ error: 'Trip not found' });
-    }
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
 
     // 2) Handle auth code if one was generated
     const auth = await LoadingAuth.findOne({ tripId });
     if (auth) {
-      if (!code) {
-        return res.status(400).json({ error: 'code is required' });
-      }
+      if (!code) return res.status(400).json({ error: 'code is required' });
       if (auth.used || auth.expiresAt < new Date() || auth.code !== code) {
         return res.status(403).json({ error: 'Invalid or expired code' });
       }
@@ -221,22 +225,29 @@ router.post('/', async (req, res, next) => {
       await auth.save();
     }
 
-    // 3) Lookup vehicle to get its depot
-    const vehicle = await require('../models/Vehicle').findOne({
-      licensePlate: trip.vehicleNo
-    });
+    // 3) Lookup vehicle correctly
+    let vehicle = null;
+    if (vehicleId) {
+      vehicle = await Vehicle.findById(vehicleId);
+    }
     if (!vehicle) {
-      return res.status(400).json({ error: 'Vehicle not found' });
+      // fallback by vehicleNo stored on Trip
+      vehicle = await Vehicle.findOne({ vehicleNo: trip.vehicleNo });
+      // If you need case-insensitive matching:
+      // vehicle = await Vehicle.findOne({ vehicleNo: trip.vehicleNo }).collation({ locale: 'en', strength: 2 });
+    }
+    if (!vehicle) {
+      return res.status(404).json({ error: 'Vehicle not found' });
     }
 
-    // 4) Create the Loading record, now including depotCd and vehicleNo
+    // 4) Create Loading with correct fields
     const loading = await Loading.create({
       tripId,
       stationId,
       product,
       qty,
-      vehicleNo: vehicle.licensePlate,
-      depotCd:   vehicle.depot
+      vehicleNo: vehicle.vehicleNo,   // ✅ correct field
+      depotCd:   vehicle.depotCd      // ✅ correct field
     });
 
     // 5) Deduct from bowser inventory
@@ -245,14 +256,15 @@ router.post('/', async (req, res, next) => {
       { $inc: { balanceLiters: -qty } }
     );
 
-    res.status(201).json({
-      message:   'Loading recorded',
+    return res.status(201).json({
+      message: 'Loading recorded',
       loadingId: loading._id
     });
   } catch (err) {
     next(err);
   }
 });
+
 
 
 module.exports = router;
