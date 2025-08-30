@@ -29,7 +29,7 @@ const loadingRouter          = require('./controllers/loadingController');
 const loadingSourceRouter    = require('./controllers/loadingsourceController');
 const vehicleMasterRouter    = require('./controllers/vehiclemasterController');
 const bowserInventoryRouter  = require('./controllers/bowserinventoryController');
-const paymentReceivedRouter  = require('./controllers/paymentreceivedController');
+const paymentReceivedRouter  = require('./controllers/paymentController');
 const orderRouter            = require('./controllers/orderController');
 const salesAssociateRouter   = require('./controllers/salesAssociateController');
 const authRouter             = require('./routes/auth');
@@ -39,6 +39,7 @@ const deliveryRouter         = require('./controllers/deliveryController');
 const vehicleRouter          = require('./controllers/vehicleController');
 const stationController      = require('./controllers/stationController');
 const invoiceRoutes          = require('./routes/invoices');
+const fleetsRouter = require('./routes/fleets');
 
 // --- NEW: import models for the stations-by-route endpoint
 const Route                  = require('./models/Route');
@@ -93,6 +94,7 @@ app.use('/api/trips',               tripRouter);
 app.use('/api/deliveries',          deliveryRouter);
 app.use('/api/stations',            stationController);
 app.use('/api/invoices',            invoiceRoutes);
+app.use('/api/fleets', fleetsRouter);
 
 // 5. Catch-all 404 for anything under /api
 app.use('/api/*', (req, res) => {

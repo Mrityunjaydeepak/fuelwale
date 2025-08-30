@@ -13,6 +13,18 @@ const Customer    = require('../models/Customer');
 const Trip        = require('../models/Trip');
 const requireAuth = require('../middleware/requireAuth');
 
+/** -------------------- UserType constants (incl. new VA/TR/AC) -------------------- **/
+const USER_TYPES = (User && User.USER_TYPES) ? User.USER_TYPES : {
+  EMPLOYEE: 'E',
+  DRIVER:   'D',
+  CUSTOMER: 'C',
+  ADMIN:    'A',
+  VEHICLE_ALLOCATION: 'VA',
+  TRIPS: 'TR',
+  ACCOUNTS: 'AC'
+};
+const ALLOWED_USER_TYPES = new Set(Object.values(USER_TYPES));
+
 /** -------------------- Pearl SMS config -------------------- **/
 const PEARL_SMS_BASE_URL = process.env.PEARL_SMS_BASE_URL || 'http://sms.pearlsms.com/public/sms/send';
 const PEARL_SMS_API_KEY  = process.env.PEARL_SMS_API_KEY; // required
@@ -30,6 +42,8 @@ const MAX_SENDS_PER_HOUR  = 5;
 const MAX_VERIFY_ATTEMPTS = 6;
 
 const otpStore = new Map(); // key: user._id.toString(), value: { otpHash, expiresAt, lastSentAt, sendCountWindowStart, sendCount, verifyAttempts }
+
+/** -------------------- Helpers -------------------- **/
 
 /** Utility: generate 6-digit numeric OTP */
 function generateOtp() {
@@ -62,7 +76,12 @@ async function sendPearlSms({ to, message }) {
   return res.data;
 }
 
-/** -------------------- NEW: OTP Login APIs -------------------- **/
+/** Admin check now uses ONLY userType (A = Admin) */
+function isAdminReq(req) {
+  return req.user?.userType === USER_TYPES.ADMIN;
+}
+
+/** -------------------- OTP Login APIs -------------------- **/
 
 // ——— POST /api/users/login/otp/request — send OTP via SMS ———
 // Body: { userId?: string, mobileNo?: string }
@@ -189,7 +208,7 @@ router.post('/login/otp/verify', async (req, res, next) => {
     otpStore.delete(key);
 
     // If driver, ensure they have an assigned or active trip (same as password flow)
-    if (user.userType === 'D') {
+    if (user.userType === USER_TYPES.DRIVER) {
       const hasTrip = await Trip.findOne({
         driverId: user.driver?._id,
         status: { $in: ['ASSIGNED', 'ACTIVE'] }
@@ -201,25 +220,22 @@ router.post('/login/otp/verify', async (req, res, next) => {
       }
     }
 
-    // Build JWT payload (mirrors your /login)
+    // Build JWT payload — userType-based auth only
     const payload = {
-      id:       user._id,
+      id:       String(user._id),
       userType: user.userType
     };
     if (user.employee) {
       payload.empCd       = user.employee.empCd;
       payload.accessLevel = user.employee.accessLevel;
     }
-    if (user.driver) {
-      payload.driverId    = user.driver._id;
-    }
-    if (user.customer) {
-      payload.customerId  = user.customer._id;
-    }
+    if (user.driver)   payload.driverId   = user.driver._id;
+    if (user.customer) payload.customerId = user.customer._id;
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '8h' });
     res.json({
       token,
+      id:       String(user._id),
       userId:   user.userId,
       userType: user.userType
     });
@@ -229,7 +245,7 @@ router.post('/login/otp/verify', async (req, res, next) => {
   }
 });
 
-/** -------------------- EXISTING: Password Login -------------------- **/
+/** -------------------- Password Login (userType-based) -------------------- **/
 
 // ——— POST /api/users/login — authenticate & issue JWT ———
 router.post('/login', async (req, res, next) => {
@@ -239,58 +255,44 @@ router.post('/login', async (req, res, next) => {
       return res.status(400).json({ error: 'userId and pwd are required' });
     }
 
-    // 1) Find user and populate the appropriate ref
     const user = await User.findOne({ userId })
       .populate('employee', 'empCd accessLevel')
       .populate('driver',   '_id')
       .populate('customer', '_id');
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
 
-    // 2) Verify password
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
     const match = await bcrypt.compare(pwd, user.pwd);
-    if (!match) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // 3) If driver, ensure they have an assigned or active trip
-    if (user.userType === 'D') {
+    if (user.userType === USER_TYPES.DRIVER) {
       const hasTrip = await Trip.findOne({
-        driverId: user.driver._id,
+        driverId: user.driver?._id,
         status: { $in: ['ASSIGNED', 'ACTIVE'] }
       });
-      if (!hasTrip) {
-        return res
-          .status(403)
-          .json({ error: 'No trips assigned to you. Please check back later.' });
-      }
+      if (!hasTrip) return res.status(403).json({ error: 'No trips assigned to you. Please check back later.' });
     }
 
-    // 4) Build JWT payload
+    // Payload — ONLY userType-based auth now
     const payload = {
-      id:       user._id,
+      id:       String(user._id),
       userType: user.userType
     };
     if (user.employee) {
       payload.empCd       = user.employee.empCd;
       payload.accessLevel = user.employee.accessLevel;
     }
-    if (user.driver) {
-      payload.driverId    = user.driver._id;
-    }
-    if (user.customer) {
-      payload.customerId  = user.customer._id;
-    }
+    if (user.driver)   payload.driverId   = user.driver._id;
+    if (user.customer) payload.customerId = user.customer._id;
 
-    // 5) Sign & return token
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '8h' });
+
     res.json({
       token,
+      id:       String(user._id),
       userId:   user.userId,
       userType: user.userType
     });
-
   } catch (err) {
     next(err);
   }
@@ -301,10 +303,12 @@ router.use(requireAuth);
 
 /**
  * GET /api/users
- * List all users (no passwords)
+ * List all users (no passwords) — ADMIN (userType 'A') only
  */
 router.get('/', async (req, res, next) => {
   try {
+    if (!isAdminReq(req)) return res.status(403).json({ error: 'Admin (userType A) required' });
+
     const users = await User.find()
       .select('-pwd')
       .populate('employee', 'empCd empName depotCd accessLevel')
@@ -318,10 +322,15 @@ router.get('/', async (req, res, next) => {
 
 /**
  * GET /api/users/:id
- * Fetch one user
+ * Fetch one user — allowed for ADMIN or the user themselves
  */
 router.get('/:id', async (req, res, next) => {
   try {
+    const isSelf = String(req.user?.id) === String(req.params.id);
+    if (!isSelf && !isAdminReq(req)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const user = await User.findById(req.params.id)
       .select('-pwd')
       .populate('employee', 'empCd empName depotCd accessLevel')
@@ -336,10 +345,13 @@ router.get('/:id', async (req, res, next) => {
 
 /**
  * POST /api/users
- * Create a new user
+ * Create a new user — ADMIN only
+ * Accepts any of: E, D, C, A, VA, TR, AC
  */
 router.post('/', async (req, res, next) => {
   try {
+    if (!isAdminReq(req)) return res.status(403).json({ error: 'Admin (userType A) required' });
+
     const {
       userId,
       userType,
@@ -358,10 +370,15 @@ router.post('/', async (req, res, next) => {
       });
     }
 
+    // Validate userType against new set (E, D, C, A, VA, TR, AC)
+    if (!ALLOWED_USER_TYPES.has(userType)) {
+      return res.status(400).json({ error: `Invalid userType. Allowed: ${[...ALLOWED_USER_TYPES].join(', ')}` });
+    }
+
     let empDoc, drvDoc, custDoc;
 
-    // validate references based on type
-    if (userType === 'E') {
+    // validate references based on type (only E/D/C)
+    if (userType === USER_TYPES.EMPLOYEE) {
       if (!empCd) {
         return res.status(400).json({ error: 'empCd required for Employee users' });
       }
@@ -371,7 +388,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    if (userType === 'D') {
+    if (userType === USER_TYPES.DRIVER) {
       if (!driverId) {
         return res.status(400).json({ error: 'driverId required for Driver users' });
       }
@@ -381,7 +398,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    if (userType === 'C') {
+    if (userType === USER_TYPES.CUSTOMER) {
       if (!customerId) {
         return res.status(400).json({ error: 'customerId required for Customer users' });
       }
@@ -391,12 +408,11 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    // hash password and create
-    const hash = await bcrypt.hash(pwd, 10);
+    // Create with plain password; hashing happens in User.pre('save')
     const newUser = await User.create({
       userId,
       userType,
-      pwd:        hash,
+      pwd, // plain text here -> model hook will hash
       mobileNo,
       depotCd,
       employee:   empDoc?._id,
@@ -421,10 +437,13 @@ router.post('/', async (req, res, next) => {
 
 /**
  * PUT /api/users/:id
- * Update a user
+ * Update a user — ADMIN only
+ * Accepts any of: E, D, C, A, VA, TR, AC
  */
 router.put('/:id', async (req, res, next) => {
   try {
+    if (!isAdminReq(req)) return res.status(403).json({ error: 'Admin (userType A) required' });
+
     const updates = {};
     const {
       userId,
@@ -438,9 +457,23 @@ router.put('/:id', async (req, res, next) => {
     } = req.body;
 
     if (userId)   updates.userId   = userId;
-    if (userType) updates.userType = userType;
+    if (userType) {
+      if (!ALLOWED_USER_TYPES.has(userType)) {
+        return res.status(400).json({ error: `Invalid userType. Allowed: ${[...ALLOWED_USER_TYPES].join(', ')}` });
+      }
+      updates.userType = userType;
+      // If switching away from E/D/C, clear links (optional, but keeps data tidy)
+      if (![USER_TYPES.EMPLOYEE, USER_TYPES.DRIVER, USER_TYPES.CUSTOMER].includes(userType)) {
+        updates.employee = undefined;
+        updates.driver   = undefined;
+        updates.customer = undefined;
+      }
+    }
     if (mobileNo) updates.mobileNo = mobileNo;
     if (depotCd)  updates.depotCd  = depotCd;
+
+    // IMPORTANT: findByIdAndUpdate DOES NOT trigger pre('save') hooks,
+    // so we must hash here if password is changing
     if (pwd) {
       updates.pwd = await bcrypt.hash(pwd, 10);
     }
@@ -491,10 +524,12 @@ router.put('/:id', async (req, res, next) => {
 
 /**
  * DELETE /api/users/:id
- * Remove a user
+ * Remove a user — ADMIN only
  */
 router.delete('/:id', async (req, res, next) => {
   try {
+    if (!isAdminReq(req)) return res.status(403).json({ error: 'Admin (userType A) required' });
+
     const deleted = await User.findByIdAndDelete(req.params.id);
     if (!deleted) {
       return res.status(404).json({ error: 'User not found' });

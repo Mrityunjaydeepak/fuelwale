@@ -1,5 +1,4 @@
 // controllers/tripController.js
-
 const express        = require('express');
 const mongoose       = require('mongoose');
 const PDFDocument    = require('pdfkit');
@@ -10,12 +9,14 @@ const QRCode         = require('qrcode');
 const router         = express.Router();
 
 const Trip           = require('../models/Trip');
+const Fleet          = require('../models/Fleet');
 const Vehicle        = require('../models/Vehicle');
 const Order          = require('../models/Order');
 const DeliveryPlan   = require('../models/DeliveryPlan');
 const Delivery       = require('../models/Delivery');
 const Invoice        = require('../models/Invoice');
 const Counter        = require('../models/Counter');
+const Driver         = require('../models/Driver'); // ⬅️ NEW: to update currentTrip/status
 const requireAuth    = require('../middleware/requireAuth');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,10 +53,10 @@ async function finalizeTripNo(clientTripNo) {
 
 /**
  * Backfill for legacy trips:
- * - Try to set missing orderId from DeliveryPlan
- * - Generate tripNo if missing
- * - If orderId is still missing, only persist tripNo via raw update (skip validators)
- * - If orderId is present, save normally (validators ok)
+ *  - Try to set missing orderId from DeliveryPlan
+ *  - Generate tripNo if missing
+ *  - NOTE: Legacy trips may still have driverId/vehicleNo. We keep this backfill
+ *    focused on orderId/tripNo only.
  */
 async function backfillTripIfNeeded(trip) {
   const updates = {};
@@ -101,8 +102,25 @@ function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Load vehicle and normalize depot */
-async function loadVehicleWithDepot(vehicleNo) {
+/** Load vehicle (with depot normalization) for a given Fleet ID or fallback vehicleNo */
+async function loadVehicleForTrip(trip) {
+  // Prefer fleet->vehicle, fallback to snapshot.vehicleNo
+  try {
+    if (trip.fleet) {
+      const f = await Fleet.findById(trip.fleet)
+        .populate({ path: 'vehicle', select: '_id vehicleNo capacity depotCd gpsYesNo depot' })
+        .lean();
+      if (f?.vehicle) {
+        const v = { ...f.vehicle };
+        if (!v.depot && v.depotCd) v.depot = { depotCd: v.depotCd };
+        else if (v.depot && !v.depot.depotCd && v.depotCd) v.depot = { ...v.depot, depotCd: v.depotCd };
+        return v;
+      }
+    }
+  } catch (_) {}
+
+  // Fallback for legacy: lookup by snapshot.vehicleNo
+  const vehicleNo = trip?.snapshot?.vehicleNo;
   if (!vehicleNo) return null;
   let veh = await Vehicle.findOne({ vehicleNo }).lean();
   if (!veh) {
@@ -165,14 +183,35 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** GET /api/trips/assigned/:driverId */
+/** GET /api/trips/assigned/:driverId
+ *  Finds trips either by Fleet assignment OR by Driver.currentTrip (ASSIGNED).
+ */
 router.get('/assigned/:driverId', async (req, res, next) => {
   try {
     const { driverId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(driverId)) {
       return res.status(400).json({ error: 'Invalid driverId' });
     }
-    const docs = await Trip.find({ driverId, status: 'ASSIGNED' }).sort({ createdAt: 1 });
+
+    // A) Fleet-based
+    const fleets = await Fleet.find({ driver: driverId }, '_id').lean();
+    const fleetIds = fleets.map(f => f._id);
+
+    // B) Driver.currentTrip fallback
+    const drv = await Driver.findById(driverId, 'currentTrip currentTripStatus').lean();
+    const driverTripId = drv?.currentTrip && (drv.currentTripStatus === 'ASSIGNED') ? drv.currentTrip : null;
+
+    const query = {
+      status: 'ASSIGNED',
+      $or: [
+        ...(fleetIds.length ? [{ fleet: { $in: fleetIds } }] : []),
+        ...(driverTripId ? [{ _id: driverTripId }] : [])
+      ]
+    };
+
+    if (!query.$or.length) return res.json([]);
+
+    const docs = await Trip.find(query).sort({ createdAt: 1 });
     const out = [];
     for (const t of docs) {
       await safeBackfill(t);
@@ -182,21 +221,45 @@ router.get('/assigned/:driverId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** GET /api/trips/active/:driverId */
+/** GET /api/trips/active/:driverId
+ *  Active trip for a driver via Fleet or Driver.currentTrip
+ */
 router.get('/active/:driverId', async (req, res, next) => {
   try {
     const { driverId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(driverId)) {
       return res.status(400).json({ error: 'Invalid driverId' });
     }
-    const trip = await Trip.findOne({ driverId, status: 'ACTIVE' });
+
+    const fleets = await Fleet.find({ driver: driverId }, '_id').lean();
+    const fleetIds = fleets.map(f => f._id);
+
+    const drv = await Driver.findById(driverId, 'currentTrip currentTripStatus').lean();
+    const driverTripId = drv?.currentTrip && (drv.currentTripStatus === 'ACTIVE') ? drv.currentTrip : null;
+
+    const query = {
+      status: 'ACTIVE',
+      $or: [
+        ...(fleetIds.length ? [{ fleet: { $in: fleetIds } }] : []),
+        ...(driverTripId ? [{ _id: driverTripId }] : [])
+      ]
+    };
+
+    if (!query.$or.length) {
+      return res.status(404).json({ error: 'No active trip found' });
+    }
+
+    const trip = await Trip.findOne(query).sort({ createdAt: 1 });
     if (!trip) return res.status(404).json({ error: 'No active trip found' });
+
     await safeBackfill(trip);
     res.json(trip.toObject());
   } catch (err) { next(err); }
 });
 
-/** GET /api/trips/:id — returns trip + vehicle + driverName + routeName */
+/** GET /api/trips/:id — returns trip + vehicle + driverName + routeName
+ *  Now populates via Fleet (vehicle + driver).
+ */
 router.get('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -205,40 +268,59 @@ router.get('/:id', async (req, res, next) => {
     }
 
     const trip = await Trip.findById(id)
-      .populate('driverId', 'name driverName')
+      .populate({
+        path: 'fleet',
+        populate: [
+          { path: 'driver',  select: 'driverName name' },
+          { path: 'vehicle', select: 'vehicleNo capacity depotCd gpsYesNo depot' },
+        ]
+      })
       .populate('routeId',  'name routeName');
 
     if (!trip) return res.status(404).json({ error: 'Trip not found' });
     await safeBackfill(trip);
 
     const out = trip.toObject();
-    out.driverName = trip.driverId ? (trip.driverId.name ?? trip.driverId.driverName ?? null) : null;
-    out.routeName  = trip.routeId  ? (trip.routeId.name  ?? trip.routeId.routeName  ?? null) : null;
-    out.vehicle    = await loadVehicleWithDepot(trip.vehicleNo);
+    out.driverName = trip.fleet?.driver ? (trip.fleet.driver.driverName ?? trip.fleet.driver.name ?? null) : null;
+    out.routeName  = trip.routeId ? (trip.routeId.name ?? trip.routeId.routeName ?? null) : null;
+    out.vehicle    = await loadVehicleForTrip(trip);
 
     res.json(out);
   } catch (err) { next(err); }
 });
 
-/** POST /api/trips/assign — trust client tripNo; enforce uniqueness */
+/** POST /api/trips/assign — trust client tripNo; enforce uniqueness
+ *  Body: { tripNo, fleetId, capacity, routeId, orderId }
+ *  Also updates the Driver's live linkage fields.
+ */
 router.post('/assign', async (req, res, next) => {
   try {
-    const { tripNo, driverId, vehicleNo, capacity, routeId, orderId } = req.body;
+    const { tripNo, fleetId, capacity, routeId, orderId } = req.body;
 
-    if (!tripNo || !driverId || !vehicleNo || capacity == null || !routeId || !orderId) {
+    if (!tripNo || !fleetId || capacity == null || !routeId || !orderId) {
       return res.status(400).json({
-        error: 'tripNo, driverId, vehicleNo, capacity, routeId & orderId are required'
+        error: 'tripNo, fleetId, capacity, routeId & orderId are required'
       });
     }
+
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
       return res.status(400).json({ error: 'Invalid orderId' });
     }
+    if (!mongoose.Types.ObjectId.isValid(fleetId)) {
+      return res.status(400).json({ error: 'Invalid fleetId' });
+    }
 
+    // Validate order is pending
     const o = await Order.findOne({ _id: orderId, orderStatus: 'PENDING' });
     if (!o) return res.status(400).json({ error: 'Order not found or not pending' });
 
-    const wantedTripNo = String(tripNo).trim();
+    // Validate fleet exists and has a vehicle
+    const fleet = await Fleet.findById(fleetId).populate('vehicle driver', '_id vehicleNo capacity').lean();
+    if (!fleet || !fleet.vehicle) {
+      return res.status(400).json({ error: 'Fleet not found or missing vehicle' });
+    }
 
+    const wantedTripNo = String(tripNo).trim();
     const existing = await Trip.findOne({ tripNo: wantedTripNo }).lean();
     if (existing) {
       return res.status(409).json({ error: 'Trip number already exists' });
@@ -247,13 +329,21 @@ router.post('/assign', async (req, res, next) => {
     const trip = await Trip.create({
       tripNo:   wantedTripNo,
       orderId,
-      driverId,
-      vehicleNo,
+      fleet:    fleetId,
       capacity,
       routeId,
       status:   'ASSIGNED',
       assigned: true
     });
+
+    // ⬇️ NEW: link to Driver live state if fleet has driver
+    if (fleet.driver?._id) {
+      await Driver.findByIdAndUpdate(
+        fleet.driver._id,
+        { $set: { currentTrip: trip._id, currentTripStatus: 'ASSIGNED' } },
+        { new: false }
+      );
+    }
 
     const requiredQty = (o.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
     await DeliveryPlan.create({
@@ -288,22 +378,44 @@ router.post('/assign', async (req, res, next) => {
   }
 });
 
-/** POST /api/trips/login */
+/** POST /api/trips/login
+ *  Body: { tripId, startKm, totalizerStart, routeId, remarks, driverId? }
+ *  Also flips Driver.currentTripStatus → ACTIVE
+ */
 router.post('/login', async (req, res, next) => {
   try {
-    const { tripId, driverId, vehicleNo, startKm, totalizerStart, routeId, remarks } = req.body;
+    const { tripId, driverId, startKm, totalizerStart, routeId, remarks } = req.body;
 
-    if (!driverId || !vehicleNo || startKm == null || totalizerStart == null || !routeId) {
+    if (startKm == null || totalizerStart == null || !routeId) {
       return res.status(400).json({
-        error: 'driverId, vehicleNo, startKm, totalizerStart and routeId are required'
+        error: 'startKm, totalizerStart and routeId are required'
       });
     }
 
     let trip = null;
+
+    // Preferred: by explicit tripId
     if (tripId && mongoose.Types.ObjectId.isValid(tripId)) {
       trip = await Trip.findOne({ _id: tripId, status: 'ASSIGNED' });
     }
-    if (!trip) trip = await Trip.findOne({ driverId, vehicleNo, status: 'ASSIGNED' });
+
+    // Backward-compat: by current driver assignment (Fleet)
+    if (!trip && driverId && mongoose.Types.ObjectId.isValid(driverId)) {
+      const fleets = await Fleet.find({ driver: driverId }, '_id').lean();
+      const fleetIds = fleets.map(f => f._id);
+      if (fleetIds.length) {
+        trip = await Trip.findOne({ fleet: { $in: fleetIds }, status: 'ASSIGNED' }).sort({ createdAt: 1 });
+      }
+      // As last fallback, use Driver.currentTrip
+      if (!trip) {
+        const drv = await Driver.findById(driverId, 'currentTrip').lean();
+        if (drv?.currentTrip) {
+          const maybe = await Trip.findOne({ _id: drv.currentTrip, status: 'ASSIGNED' });
+          if (maybe) trip = maybe;
+        }
+      }
+    }
+
     if (!trip) return res.status(403).json({ error: 'No assigned trip to start. Please check back later.' });
 
     await safeBackfill(trip);
@@ -312,12 +424,28 @@ router.post('/login', async (req, res, next) => {
     trip.totalizerStart = totalizerStart;
     trip.routeId        = routeId;
     trip.remarks        = remarks;
-    trip.dieselOpening  = await getDieselOpening(vehicleNo);
+    const vehicleNoForOpening = trip?.snapshot?.vehicleNo || null;
+    trip.dieselOpening  = await getDieselOpening(vehicleNoForOpening);
     trip.loginTime      = new Date();
     trip.status         = 'ACTIVE';
     await trip.save();
 
-    const deliveries = await getTodayDeliveries(driverId);
+    // ⬇️ NEW: flip driver status to ACTIVE (resolve driver via Fleet if not provided)
+    let driverToFlip = driverId;
+    if (!driverToFlip && trip.fleet) {
+      const f = await Fleet.findById(trip.fleet, 'driver').lean();
+      if (f?.driver) driverToFlip = f.driver;
+    }
+    if (driverToFlip) {
+      await Driver.findByIdAndUpdate(
+        driverToFlip,
+        { $set: { currentTrip: trip._id, currentTripStatus: 'ACTIVE' } },
+        { new: false }
+      );
+    }
+
+    // For compatibility we still return deliveries by driverId if provided.
+    const deliveries = driverToFlip ? await getTodayDeliveries(driverToFlip) : [];
 
     res.json({
       message:       'Trip started successfully',
@@ -328,7 +456,9 @@ router.post('/login', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** POST /api/trips/logout */
+/** POST /api/trips/logout
+ *  Also clears Driver.currentTrip and sets status → COMPLETED
+ */
 router.post('/logout', async (req, res, next) => {
   try {
     const { tripId, endKm, totalizerEnd } = req.body;
@@ -349,10 +479,25 @@ router.post('/logout', async (req, res, next) => {
     trip.status       = 'COMPLETED';
     await trip.save();
 
-    await Vehicle.findOneAndUpdate(
-      { vehicleNo: trip.vehicleNo },
-      { lastKm: endKm, lastTotalizer: totalizerEnd }
-    );
+    // Update vehicle's last telemetry by snapshot.vehicleNo (stable per trip)
+    if (trip?.snapshot?.vehicleNo) {
+      await Vehicle.findOneAndUpdate(
+        { vehicleNo: trip.snapshot.vehicleNo },
+        { lastKm: endKm, lastTotalizer: totalizerEnd }
+      );
+    }
+
+    // ⬇️ NEW: clear driver's live linkage
+    if (trip.fleet) {
+      const f = await Fleet.findById(trip.fleet, 'driver').lean();
+      if (f?.driver) {
+        await Driver.findByIdAndUpdate(
+          f.driver,
+          { $set: { currentTripStatus: 'COMPLETED' }, $unset: { currentTrip: "" } },
+          { new: false }
+        );
+      }
+    }
 
     const deliveries = await Delivery.find({ tripId })
       .populate('orderId')
@@ -379,9 +524,30 @@ router.post('/logout', async (req, res, next) => {
       });
     }));
 
+    // ✅ NEW: mark all related orders as COMPLETED
+    try {
+      const uniqueOrderIds = [
+        ...new Set(
+          deliveries
+            .map(d => d?.orderId?._id || d?.orderId)
+            .filter(Boolean)
+            .map(id => String(id))
+        )
+      ];
+      if (uniqueOrderIds.length) {
+        await Order.updateMany(
+          { _id: { $in: uniqueOrderIds } },
+          { $set: { orderStatus: 'COMPLETED', completedAt: new Date() } }
+        );
+      }
+    } catch (e) {
+      console.warn('Order status update failed for trip', String(tripId), e?.message || e);
+    }
+
     res.json({ message: 'Trip closed and orders invoiced', trip, invoices });
   } catch (err) { next(err); }
 });
+
 
 /** GET /api/trips/:id/invoice */
 router.get('/:id/invoice', async (req, res, next) => {
@@ -441,7 +607,7 @@ router.get('/:id/invoice', async (req, res, next) => {
       ['Invoice Date:', todayStr],
       ['District:',     customer.district || '—'],
       ['RSM:',          customer.rsmName || '—'],
-      ['Dispenser ID:', trip.vehicleNo || '—'],
+      ['Dispenser ID:', trip?.snapshot?.vehicleNo || '—'],
       ['Ref. No.:',     order.referenceNo || trip.tripNo || '—'],
       ['Credit Period:', (order.creditDays != null ? `${order.creditDays} Days` : '1 Days')]
     ];
@@ -519,7 +685,8 @@ router.get('/:id/invoice', async (req, res, next) => {
     cell(doc, leftX + cDesc + cQty + cPer, itemsHeaderY, cRate, 22, 'Unit Rate', { bold: true, align: 'right' });
     cell(doc, leftX + cDesc + cQty + cPer + cRate, itemsHeaderY, cAmt, 22, 'Amount', { bold: true, align: 'right' });
 
-    let iy = itemsHeaderY + 22;
+    const rowsStartY = itemsHeaderY + 22;
+    let iy = rowsStartY;
     rows.forEach(r => {
       cell(doc, leftX, iy, cDesc, 22, r.desc);
       cell(doc, leftX + cDesc, iy, cQty, 22, String(r.qty), { align: 'right' });
@@ -611,6 +778,13 @@ router.delete('/:id', async (req, res, next) => {
     }
     const deleted = await Trip.findByIdAndDelete(id);
     if (!deleted) return res.status(404).json({ error: 'Not found' });
+
+    // Best-effort: if any driver points to this trip, clear it
+    await Driver.updateMany(
+      { currentTrip: id },
+      { $unset: { currentTrip: "" }, $set: { currentTripStatus: 'COMPLETED' } }
+    );
+
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });

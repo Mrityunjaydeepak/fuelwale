@@ -1,38 +1,43 @@
+// models/Invoice.js
 const mongoose = require('mongoose');
-const { Schema, model, models } = mongoose;
 
-const InvoiceSchema = new Schema({
-  order: {
-    type: Schema.Types.ObjectId,
-    ref: 'Order',
-    required: true
+const InvoiceItemSchema = new mongoose.Schema({
+  productCode: { type: String },
+  productName: { type: String, default: 'diesel' },
+  quantity:    { type: Number, default: 0 },
+  uom:         { type: String, default: 'Liter' },
+  rate:        { type: Number, default: 0 },
+  amount:      { type: Number, default: 0 }
+}, { _id: false });
+
+const InvoiceSchema = new mongoose.Schema({
+  invoiceNo:   { type: String, index: true }, // optional
+  invoiceDate: { type: Date, default: Date.now },
+
+  // links
+  tripId:      { type: mongoose.Schema.Types.ObjectId, ref: 'Trip' },
+  order:       { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
+  customer:    { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
+
+  // denorm snapshots for stability
+  customerSnap: {
+    custCd: String, custName: String, address: String, shipToAddress: String,
+    district: String, rsmName: String, receiverPhone: String
   },
-  customer: {
-    type: Schema.Types.ObjectId,
-    ref: 'Customer',
-    required: true
+  orderSnap: {
+    referenceNo: String, paymentMethod: String, creditDays: Number,
+    shipToAddress: String
   },
-  items: [
-    {
-      productName: { type: String, required: true },
-      quantity:    { type: Number, required: true },
-      rate:        { type: Number, required: true },
-      amount:      { type: Number, required: true }
-    }
-  ],
-  totalAmount: {
-    type: Number,
-    required: true
+  vehicleSnap: {
+    vehicleNo: String, routeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Route' }
   },
-  dcNumber: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  invoiceDate: {
-    type: Date,
-    default: Date.now
-  }
+
+  items:       { type: [InvoiceItemSchema], default: [] },
+  subTotal:    { type: Number, default: 0 },    // before taxes/charges
+  totalAmount: { type: Number, default: 0 },
+
+  dcNumber:    { type: String },
+  notes:       { type: String }
 }, { timestamps: true });
 
-module.exports = models.Invoice || model('Invoice', InvoiceSchema);
+module.exports = mongoose.model('Invoice', InvoiceSchema);
