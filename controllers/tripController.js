@@ -16,7 +16,7 @@ const DeliveryPlan   = require('../models/DeliveryPlan');
 const Delivery       = require('../models/Delivery');
 const Invoice        = require('../models/Invoice');
 const Counter        = require('../models/Counter');
-const Driver         = require('../models/Driver'); // ⬅️ NEW: to update currentTrip/status
+const Driver         = require('../models/Driver'); // to update currentTrip/status
 const requireAuth    = require('../middleware/requireAuth');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +36,6 @@ function extractTripPrefix(tn) {
   return s.replace(/(\d+)\s*$/, '');
 }
 async function getNextTripSerialString() {
-  // First call after upsert will set seq from -1 -> 0
   const doc = await Counter.findOneAndUpdate(
     { _id: 'tripSerial' },
     { $setOnInsert: { seq: -1 }, $inc: { seq: 1 } },
@@ -52,11 +51,7 @@ async function finalizeTripNo(clientTripNo) {
 }
 
 /**
- * Backfill for legacy trips:
- *  - Try to set missing orderId from DeliveryPlan
- *  - Generate tripNo if missing
- *  - NOTE: Legacy trips may still have driverId/vehicleNo. We keep this backfill
- *    focused on orderId/tripNo only.
+ * Backfill for legacy trips
  */
 async function backfillTripIfNeeded(trip) {
   const updates = {};
@@ -74,21 +69,18 @@ async function backfillTripIfNeeded(trip) {
 
   if (!Object.keys(updates).length) return trip;
 
-  // Case A: still no orderId → set tripNo silently via updateOne (no validators)
   if (!updates.orderId && !trip.orderId && updates.tripNo) {
     await Trip.updateOne({ _id: trip._id }, { $set: { tripNo: updates.tripNo } }, { runValidators: false });
     trip.tripNo = updates.tripNo;
     return trip;
   }
 
-  // Case B: we have orderId → normal save
   if (updates.orderId) trip.orderId = updates.orderId;
   if (updates.tripNo)  trip.tripNo  = updates.tripNo;
   await trip.save();
   return trip;
 }
 
-// safer wrapper so one bad document doesn't break list endpoints
 async function safeBackfill(trip) {
   try {
     if (!trip.tripNo || !trip.orderId) await backfillTripIfNeeded(trip);
@@ -104,7 +96,6 @@ function escapeRegExp(s) {
 
 /** Load vehicle (with depot normalization) for a given Fleet ID or fallback vehicleNo */
 async function loadVehicleForTrip(trip) {
-  // Prefer fleet->vehicle, fallback to snapshot.vehicleNo
   try {
     if (trip.fleet) {
       const f = await Fleet.findById(trip.fleet)
@@ -119,7 +110,6 @@ async function loadVehicleForTrip(trip) {
     }
   } catch (_) {}
 
-  // Fallback for legacy: lookup by snapshot.vehicleNo
   const vehicleNo = trip?.snapshot?.vehicleNo;
   if (!vehicleNo) return null;
   let veh = await Vehicle.findOne({ vehicleNo }).lean();
@@ -133,6 +123,28 @@ async function loadVehicleForTrip(trip) {
   if (!out.depot && out.depotCd) out.depot = { depotCd: out.depotCd };
   else if (out.depot && !out.depot.depotCd && out.depotCd) out.depot = { ...out.depot, depotCd: out.depotCd };
   return out;
+}
+
+/** ── Capacity helpers ───────────────────────────────────────────────────── */
+
+async function computePlannedQty(tripId) {
+  const plans = await DeliveryPlan.find({ tripId }, 'requiredQty').lean();
+  return plans.reduce((sum, p) => sum + (Number(p.requiredQty) || 0), 0);
+}
+
+async function getCapacityInfo(trip) {
+  // Prefer trip.capacity; otherwise try fleet.vehicle.capacity
+  let capacity = Number(trip.capacity) || 0;
+
+  if (!capacity && trip.fleet) {
+    const f = await Fleet.findById(trip.fleet).populate('vehicle', 'capacity').lean();
+    const vehCap = Number(f?.vehicle?.capacity) || 0;
+    capacity = vehCap || capacity;
+  }
+
+  const plannedQty = await computePlannedQty(trip._id);
+  const remainingQty = Math.max(0, (capacity || 0) - plannedQty);
+  return { capacity, plannedQty, remainingQty };
 }
 
 // ── PDF helpers ──────────────────────────────────────────────────────────────
@@ -183,9 +195,7 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** GET /api/trips/assigned/:driverId
- *  Finds trips either by Fleet assignment OR by Driver.currentTrip (ASSIGNED).
- */
+/** GET /api/trips/assigned/:driverId */
 router.get('/assigned/:driverId', async (req, res, next) => {
   try {
     const { driverId } = req.params;
@@ -221,9 +231,7 @@ router.get('/assigned/:driverId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** GET /api/trips/active/:driverId
- *  Active trip for a driver via Fleet or Driver.currentTrip
- */
+/** GET /api/trips/active/:driverId */
 router.get('/active/:driverId', async (req, res, next) => {
   try {
     const { driverId } = req.params;
@@ -257,9 +265,7 @@ router.get('/active/:driverId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** GET /api/trips/:id — returns trip + vehicle + driverName + routeName
- *  Now populates via Fleet (vehicle + driver).
- */
+/** GET /api/trips/:id — returns trip + vehicle + driverName + routeName + capacityInfo */
 router.get('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -272,7 +278,7 @@ router.get('/:id', async (req, res, next) => {
         path: 'fleet',
         populate: [
           { path: 'driver',  select: 'driverName name' },
-          { path: 'vehicle', select: 'vehicleNo capacity depotCd gpsYesNo depot' },
+          { path: 'vehicle', select: '_id vehicleNo capacity depotCd gpsYesNo depot' },
         ]
       })
       .populate('routeId',  'name routeName');
@@ -280,26 +286,32 @@ router.get('/:id', async (req, res, next) => {
     if (!trip) return res.status(404).json({ error: 'Trip not found' });
     await safeBackfill(trip);
 
+    const capacityInfo = await getCapacityInfo(trip);
+
     const out = trip.toObject();
     out.driverName = trip.fleet?.driver ? (trip.fleet.driver.driverName ?? trip.fleet.driver.name ?? null) : null;
     out.routeName  = trip.routeId ? (trip.routeId.name ?? trip.routeId.routeName ?? null) : null;
     out.vehicle    = await loadVehicleForTrip(trip);
+    out.capacityInfo = capacityInfo;
 
     res.json(out);
   } catch (err) { next(err); }
 });
 
-/** POST /api/trips/assign — trust client tripNo; enforce uniqueness
- *  Body: { tripNo, fleetId, capacity, routeId, orderId }
- *  Also updates the Driver's live linkage fields.
+/** POST /api/trips/assign — trust client tripNo; enforce uniqueness; capacity-aware
+ *  Body: { tripNo, fleetId, capacity?, routeId, orderId }
+ *  - capacity defaults to vehicle.capacity if not provided.
+ *  - seeds DeliveryPlan & Delivery for the first order.
+ *  - rejects if requiredQty of the first order exceeds capacity.
+ *  - updates Driver.currentTrip/Status if fleet has a driver.
  */
 router.post('/assign', async (req, res, next) => {
   try {
-    const { tripNo, fleetId, capacity, routeId, orderId } = req.body;
+    let { tripNo, fleetId, capacity, routeId, orderId } = req.body;
 
-    if (!tripNo || !fleetId || capacity == null || !routeId || !orderId) {
+    if (!tripNo || !fleetId || !routeId || !orderId) {
       return res.status(400).json({
-        error: 'tripNo, fleetId, capacity, routeId & orderId are required'
+        error: 'tripNo, fleetId, routeId & orderId are required'
       });
     }
 
@@ -311,8 +323,8 @@ router.post('/assign', async (req, res, next) => {
     }
 
     // Validate order is pending
-    const o = await Order.findOne({ _id: orderId, orderStatus: 'PENDING' });
-    if (!o) return res.status(400).json({ error: 'Order not found or not pending' });
+    const order = await Order.findOne({ _id: orderId, orderStatus: 'PENDING' });
+    if (!order) return res.status(400).json({ error: 'Order not found or not pending' });
 
     // Validate fleet exists and has a vehicle
     const fleet = await Fleet.findById(fleetId).populate('vehicle driver', '_id vehicleNo capacity').lean();
@@ -320,23 +332,38 @@ router.post('/assign', async (req, res, next) => {
       return res.status(400).json({ error: 'Fleet not found or missing vehicle' });
     }
 
+    // TripNo uniqueness
     const wantedTripNo = String(tripNo).trim();
     const existing = await Trip.findOne({ tripNo: wantedTripNo }).lean();
     if (existing) {
       return res.status(409).json({ error: 'Trip number already exists' });
     }
 
+    // Determine capacity (prefer body, fallback to vehicle)
+    const vehicleCapacity = Number(fleet.vehicle.capacity) || 0;
+    const tripCapacity = Number(capacity ?? vehicleCapacity) || 0;
+
+    // Compute first order required qty
+    const requiredQty = (order.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+
+    if (requiredQty > tripCapacity) {
+      return res.status(409).json({
+        error: 'First order quantity exceeds trip capacity',
+        details: { requiredQty, tripCapacity }
+      });
+    }
+
     const trip = await Trip.create({
       tripNo:   wantedTripNo,
-      orderId,
+      orderId,                  // keep primary order link for legacy compatibility
       fleet:    fleetId,
-      capacity,
+      capacity: tripCapacity,   // persist on trip
       routeId,
       status:   'ASSIGNED',
       assigned: true
     });
 
-    // ⬇️ NEW: link to Driver live state if fleet has driver
+    // Link driver live state if fleet has driver
     if (fleet.driver?._id) {
       await Driver.findByIdAndUpdate(
         fleet.driver._id,
@@ -345,30 +372,33 @@ router.post('/assign', async (req, res, next) => {
       );
     }
 
-    const requiredQty = (o.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+    // Seed DeliveryPlan + seed Delivery
     await DeliveryPlan.create({
       tripId:     trip._id,
-      orderId:    o._id,
-      customerId: o.customer,
-      shipTo:     o.shipToAddress,
+      orderId:    order._id,
+      customerId: order.customer,
+      shipTo:     order.shipToAddress,
       requiredQty
     });
 
     await Delivery.create({
       tripId:     trip._id,
-      orderId:    o._id,
-      customerId: o.customer,
-      shipTo:     o.shipToAddress,
+      orderId:    order._id,
+      customerId: order.customer,
+      shipTo:     order.shipToAddress,
       qty:        0,
       rate:       0,
       dcNo:       null
     });
 
+    const cap = await getCapacityInfo(trip);
+
     res.status(201).json({
       message:               'Trip assigned',
       tripId:                trip._id,
       tripNo:                trip.tripNo,
-      seededDeliveriesCount: 1
+      seededDeliveriesCount: 1,
+      capacityInfo:          cap
     });
   } catch (err) {
     if (err?.code === 11000 && err?.keyPattern?.tripNo) {
@@ -378,10 +408,97 @@ router.post('/assign', async (req, res, next) => {
   }
 });
 
-/** POST /api/trips/login
- *  Body: { tripId, startKm, totalizerStart, routeId, remarks, driverId? }
- *  Also flips Driver.currentTripStatus → ACTIVE
+/** NEW: POST /api/trips/:id/rides — add another order (ride) to the same trip
+ *  Body: { orderId }
+ *  Rules:
+ *   - Trip must exist and be in ASSIGNED or ACTIVE (you can choose to lock once ACTIVE; here we allow both).
+ *   - Order must be PENDING.
+ *   - Do not add the same order twice to the same trip.
+ *   - Sum of DeliveryPlan.requiredQty for the trip must NOT exceed trip.capacity.
  */
+router.post('/:id/rides', async (req, res, next) => {
+  try {
+    const { id: tripId } = req.params;
+    const { orderId } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(tripId)) {
+      return res.status(400).json({ error: 'Invalid trip ID' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({ error: 'Invalid orderId' });
+    }
+
+    const trip = await Trip.findById(tripId);
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    if (!['ASSIGNED', 'ACTIVE'].includes(trip.status)) {
+      return res.status(409).json({ error: `Cannot add rides on trip with status ${trip.status}` });
+    }
+
+    const order = await Order.findOne({ _id: orderId, orderStatus: 'PENDING' });
+    if (!order) return res.status(400).json({ error: 'Order not found or not pending' });
+
+    // Reject duplicates (same order on same trip)
+    const existsPlan = await DeliveryPlan.findOne({ tripId, orderId }).lean();
+    if (existsPlan) {
+      return res.status(409).json({ error: 'This order is already added to the trip' });
+    }
+
+    const { capacity, plannedQty, remainingQty } = await getCapacityInfo(trip);
+    const requiredQty = (order.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+
+    if (requiredQty > remainingQty) {
+      return res.status(409).json({
+        error: 'Adding this order exceeds trip capacity',
+        details: { capacity, plannedQty, remainingQty, requiredQty, willExceedBy: requiredQty - remainingQty }
+      });
+    }
+
+    // Add DeliveryPlan + seed Delivery for this order
+    await DeliveryPlan.create({
+      tripId,
+      orderId:    order._id,
+      customerId: order.customer,
+      shipTo:     order.shipToAddress,
+      requiredQty
+    });
+
+    await Delivery.create({
+      tripId,
+      orderId:    order._id,
+      customerId: order.customer,
+      shipTo:     order.shipToAddress,
+      qty:        0,
+      rate:       0,
+      dcNo:       null
+    });
+
+    const after = await getCapacityInfo(trip);
+
+    res.status(201).json({
+      message: 'Order added to trip',
+      tripId,
+      orderId,
+      capacityInfo: after
+    });
+  } catch (err) { next(err); }
+});
+
+/** NEW: GET /api/trips/:id/capacity — quick capacity summary */
+router.get('/:id/capacity', async (req, res, next) => {
+  try {
+    const { id: tripId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(tripId)) {
+      return res.status(400).json({ error: 'Invalid trip ID' });
+    }
+    const trip = await Trip.findById(tripId);
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+
+    const info = await getCapacityInfo(trip);
+    res.json(info);
+  } catch (err) { next(err); }
+});
+
+/** POST /api/trips/login */
 router.post('/login', async (req, res, next) => {
   try {
     const { tripId, driverId, startKm, totalizerStart, routeId, remarks } = req.body;
@@ -394,19 +511,16 @@ router.post('/login', async (req, res, next) => {
 
     let trip = null;
 
-    // Preferred: by explicit tripId
     if (tripId && mongoose.Types.ObjectId.isValid(tripId)) {
       trip = await Trip.findOne({ _id: tripId, status: 'ASSIGNED' });
     }
 
-    // Backward-compat: by current driver assignment (Fleet)
     if (!trip && driverId && mongoose.Types.ObjectId.isValid(driverId)) {
       const fleets = await Fleet.find({ driver: driverId }, '_id').lean();
       const fleetIds = fleets.map(f => f._id);
       if (fleetIds.length) {
         trip = await Trip.findOne({ fleet: { $in: fleetIds }, status: 'ASSIGNED' }).sort({ createdAt: 1 });
       }
-      // As last fallback, use Driver.currentTrip
       if (!trip) {
         const drv = await Driver.findById(driverId, 'currentTrip').lean();
         if (drv?.currentTrip) {
@@ -430,7 +544,6 @@ router.post('/login', async (req, res, next) => {
     trip.status         = 'ACTIVE';
     await trip.save();
 
-    // ⬇️ NEW: flip driver status to ACTIVE (resolve driver via Fleet if not provided)
     let driverToFlip = driverId;
     if (!driverToFlip && trip.fleet) {
       const f = await Fleet.findById(trip.fleet, 'driver').lean();
@@ -444,7 +557,6 @@ router.post('/login', async (req, res, next) => {
       );
     }
 
-    // For compatibility we still return deliveries by driverId if provided.
     const deliveries = driverToFlip ? await getTodayDeliveries(driverToFlip) : [];
 
     res.json({
@@ -456,9 +568,7 @@ router.post('/login', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** POST /api/trips/logout
- *  Also clears Driver.currentTrip and sets status → COMPLETED
- */
+/** POST /api/trips/logout */
 router.post('/logout', async (req, res, next) => {
   try {
     const { tripId, endKm, totalizerEnd } = req.body;
@@ -479,7 +589,6 @@ router.post('/logout', async (req, res, next) => {
     trip.status       = 'COMPLETED';
     await trip.save();
 
-    // Update vehicle's last telemetry by snapshot.vehicleNo (stable per trip)
     if (trip?.snapshot?.vehicleNo) {
       await Vehicle.findOneAndUpdate(
         { vehicleNo: trip.snapshot.vehicleNo },
@@ -487,7 +596,6 @@ router.post('/logout', async (req, res, next) => {
       );
     }
 
-    // ⬇️ NEW: clear driver's live linkage
     if (trip.fleet) {
       const f = await Fleet.findById(trip.fleet, 'driver').lean();
       if (f?.driver) {
@@ -524,7 +632,7 @@ router.post('/logout', async (req, res, next) => {
       });
     }));
 
-    // ✅ NEW: mark all related orders as COMPLETED
+    // Mark all related orders as COMPLETED
     try {
       const uniqueOrderIds = [
         ...new Set(
@@ -548,7 +656,6 @@ router.post('/logout', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-
 /** GET /api/trips/:id/invoice */
 router.get('/:id/invoice', async (req, res, next) => {
   try {
@@ -569,7 +676,6 @@ router.get('/:id/invoice', async (req, res, next) => {
       return res.status(404).json({ error: 'No deliveries found for this trip' });
     }
 
-    // Company branding (env overrides supported)
     const COMPANY = {
       titleTop:  'Delivery cum Sales Invoice',
       name:     process.env.COMPANY_NAME    || 'SHREENATH PETROLEUM',
@@ -746,7 +852,7 @@ router.get('/:id/invoice', async (req, res, next) => {
 
     const rightX = leftX + colA + colB + 8;
     doc.font('Helvetica').fontSize(10).text('For,', rightX, blockY + 8);
-    doc.font('Helvetica-Bold').fontSize(11).text(`${COMPANY.name} ${COMPANY.suffix ? 'PVT LTD' : ''}`, rightX + 20, blockY + 8);
+    doc.font('Helvetica-Bold').fontSize(11).text(`${bank.acctName}`, rightX + 20, blockY + 8);
     if (exists(imgStampPath)) doc.image(imgStampPath, rightX + 20, blockY + 28, { width: 110, height: 110, fit: [110, 110], opacity: 0.9 });
     doc.font('Helvetica').fontSize(10).text('Authorized Sign.', rightX + 10, blockY + blockH - 20);
 

@@ -96,6 +96,8 @@ app.use('/api/stations',            stationController);
 app.use('/api/invoices',            invoiceRoutes);
 app.use('/api/fleets', fleetsRouter);
 
+app.use('/api/payrec', require('./controllers/payrecController'));
+
 // 5. Catch-all 404 for anything under /api
 app.use('/api/*', (req, res) => {
   res.status(404).json({ error: `No API route for ${req.originalUrl}` });
