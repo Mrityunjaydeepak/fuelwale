@@ -10,7 +10,7 @@ const EmployeeSchema = new Schema(
     empCd:       { type: String, required: true, unique: true, trim: true },
     empName:     { type: String, required: true, trim: true },
     depotCd:     { type: String, trim: true },
-    accessLevel: { type: Number, required: true, min: 0 },
+    accessLevel: { type: Number,  min: 0 },
 
     // NEW: roles (supports multiple roles)
     roles: {

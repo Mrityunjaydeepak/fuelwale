@@ -99,7 +99,10 @@ async function loadVehicleForTrip(trip) {
   try {
     if (trip.fleet) {
       const f = await Fleet.findById(trip.fleet)
-        .populate({ path: 'vehicle', select: '_id vehicleNo capacity depotCd gpsYesNo depot' })
+        .populate({ 
+          path: 'vehicle', 
+          select: '_id vehicleNo capacityLtrs calibratedCapacity depotCd gpsYesNo depot' 
+        })
         .lean();
       if (f?.vehicle) {
         const v = { ...f.vehicle };
@@ -132,14 +135,20 @@ async function computePlannedQty(tripId) {
   return plans.reduce((sum, p) => sum + (Number(p.requiredQty) || 0), 0);
 }
 
+// Use calibratedCapacity first, fallback to capacityLtrs, else trip.capacity, in that order
 async function getCapacityInfo(trip) {
-  // Prefer trip.capacity; otherwise try fleet.vehicle.capacity
+  // If the trip already has a positive capacity set, prefer it
   let capacity = Number(trip.capacity) || 0;
 
+  // Otherwise derive from the fleet vehicle
   if (!capacity && trip.fleet) {
-    const f = await Fleet.findById(trip.fleet).populate('vehicle', 'capacity').lean();
-    const vehCap = Number(f?.vehicle?.capacity) || 0;
-    capacity = vehCap || capacity;
+    const f = await Fleet.findById(trip.fleet)
+      .populate('vehicle', 'calibratedCapacity capacityLtrs')
+      .lean();
+
+    const cal = Number(f?.vehicle?.calibratedCapacity) || 0;
+    const max = Number(f?.vehicle?.capacityLtrs) || 0;
+    capacity = cal > 0 ? cal : max;
   }
 
   const plannedQty = await computePlannedQty(trip._id);
@@ -278,7 +287,7 @@ router.get('/:id', async (req, res, next) => {
         path: 'fleet',
         populate: [
           { path: 'driver',  select: 'driverName name' },
-          { path: 'vehicle', select: '_id vehicleNo capacity depotCd gpsYesNo depot' },
+          { path: 'vehicle', select: '_id vehicleNo capacityLtrs calibratedCapacity depotCd gpsYesNo depot' },
         ]
       })
       .populate('routeId',  'name routeName');
@@ -300,7 +309,7 @@ router.get('/:id', async (req, res, next) => {
 
 /** POST /api/trips/assign — trust client tripNo; enforce uniqueness; capacity-aware
  *  Body: { tripNo, fleetId, capacity?, routeId, orderId }
- *  - capacity defaults to vehicle.capacity if not provided.
+ *  - capacity defaults to vehicle.calibratedCapacity || vehicle.capacityLtrs if not provided.
  *  - seeds DeliveryPlan & Delivery for the first order.
  *  - rejects if requiredQty of the first order exceeds capacity.
  *  - updates Driver.currentTrip/Status if fleet has a driver.
@@ -327,7 +336,9 @@ router.post('/assign', async (req, res, next) => {
     if (!order) return res.status(400).json({ error: 'Order not found or not pending' });
 
     // Validate fleet exists and has a vehicle
-    const fleet = await Fleet.findById(fleetId).populate('vehicle driver', '_id vehicleNo capacity').lean();
+    const fleet = await Fleet.findById(fleetId)
+      .populate('vehicle driver', '_id vehicleNo calibratedCapacity capacityLtrs')
+      .lean();
     if (!fleet || !fleet.vehicle) {
       return res.status(400).json({ error: 'Fleet not found or missing vehicle' });
     }
@@ -339,12 +350,21 @@ router.post('/assign', async (req, res, next) => {
       return res.status(409).json({ error: 'Trip number already exists' });
     }
 
-    // Determine capacity (prefer body, fallback to vehicle)
-    const vehicleCapacity = Number(fleet.vehicle.capacity) || 0;
-    const tripCapacity = Number(capacity ?? vehicleCapacity) || 0;
+    // Determine capacity (prefer explicit body if >0; else calibrated, else nominal)
+    const calCap = Number(fleet.vehicle.calibratedCapacity) || 0;
+    const maxCap = Number(fleet.vehicle.capacityLtrs) || 0;
+
+    let tripCapacity = Number(capacity);
+    if (!(tripCapacity > 0)) {
+      tripCapacity = calCap > 0 ? calCap : maxCap;
+    }
 
     // Compute first order required qty
     const requiredQty = (order.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+
+    if (tripCapacity <= 0) {
+      return res.status(409).json({ error: 'Vehicle capacity not defined' });
+    }
 
     if (requiredQty > tripCapacity) {
       return res.status(409).json({
@@ -360,7 +380,12 @@ router.post('/assign', async (req, res, next) => {
       capacity: tripCapacity,   // persist on trip
       routeId,
       status:   'ASSIGNED',
-      assigned: true
+      assigned: true,
+      snapshot: {
+        vehicleNo: fleet.vehicle.vehicleNo,
+        capacityCal: calCap,
+        capacityMax: maxCap
+      }
     });
 
     // Link driver live state if fleet has driver
@@ -411,7 +436,7 @@ router.post('/assign', async (req, res, next) => {
 /** NEW: POST /api/trips/:id/rides — add another order (ride) to the same trip
  *  Body: { orderId }
  *  Rules:
- *   - Trip must exist and be in ASSIGNED or ACTIVE (you can choose to lock once ACTIVE; here we allow both).
+ *   - Trip must exist and be in ASSIGNED or ACTIVE.
  *   - Order must be PENDING.
  *   - Do not add the same order twice to the same trip.
  *   - Sum of DeliveryPlan.requiredQty for the trip must NOT exceed trip.capacity.
@@ -565,7 +590,9 @@ router.post('/login', async (req, res, next) => {
       dieselOpening: trip.dieselOpening,
       deliveries
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 /** POST /api/trips/logout */
