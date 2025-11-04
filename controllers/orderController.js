@@ -326,6 +326,27 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+
+
+// PATCH /orders/:id/status  { orderStatus: 'ASSIGNED' }
+router.patch('/:id/status', async (req, res, next) => {
+  try {
+    const { orderStatus } = req.body;
+    if (!['PENDING','PARTIALLY_COMPLETED','COMPLETED','CANCELLED','ASSIGNED'].includes(orderStatus)) {
+      return res.status(400).json({ error: 'Invalid orderStatus' });
+    }
+    const doc = await Order.findByIdAndUpdate(
+      req.params.id,
+      { $set: { orderStatus } },
+      { new: true, runValidators: true }
+    );
+    if (!doc) return res.status(404).json({ error: 'Order not found' });
+    res.json(doc);
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
 // PUT /api/orders/:id
 router.put('/:id', async (req, res, next) => {
   try {
