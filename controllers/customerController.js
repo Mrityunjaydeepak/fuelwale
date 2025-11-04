@@ -47,6 +47,8 @@ exports.createCustomer = async (req, res, next) => {
       billCity,
       billPin,
       billStateCd,
+
+      // Shipping 1
       shipTo1Add1,
       shipTo1Add2,
       shipTo1Add3,
@@ -54,6 +56,8 @@ exports.createCustomer = async (req, res, next) => {
       shipTo1City,
       shipTo1Pin,
       shipTo1StateCd,
+
+      // Shipping 2
       shipTo2Add1,
       shipTo2Add2,
       shipTo2Add3,
@@ -61,6 +65,35 @@ exports.createCustomer = async (req, res, next) => {
       shipTo2City,
       shipTo2Pin,
       shipTo2StateCd,
+
+      // Shipping 3
+      shipTo3Add1,
+      shipTo3Add2,
+      shipTo3Add3,
+      shipTo3Area,
+      shipTo3City,
+      shipTo3Pin,
+      shipTo3StateCd,
+
+      // Shipping 4
+      shipTo4Add1,
+      shipTo4Add2,
+      shipTo4Add3,
+      shipTo4Area,
+      shipTo4City,
+      shipTo4Pin,
+      shipTo4StateCd,
+
+      // Shipping 5
+      shipTo5Add1,
+      shipTo5Add2,
+      shipTo5Add3,
+      shipTo5Area,
+      shipTo5City,
+      shipTo5Pin,
+      shipTo5StateCd,
+
+      // Tax/IDs and misc
       custGST,
       custPAN,
       custPeso,
@@ -92,6 +125,8 @@ exports.createCustomer = async (req, res, next) => {
       billCity,
       billPin,
       billStateCd,
+
+      // Ship-to 1..5
       shipTo1Add1,
       shipTo1Add2,
       shipTo1Add3,
@@ -99,6 +134,7 @@ exports.createCustomer = async (req, res, next) => {
       shipTo1City,
       shipTo1Pin,
       shipTo1StateCd,
+
       shipTo2Add1,
       shipTo2Add2,
       shipTo2Add3,
@@ -106,6 +142,31 @@ exports.createCustomer = async (req, res, next) => {
       shipTo2City,
       shipTo2Pin,
       shipTo2StateCd,
+
+      shipTo3Add1,
+      shipTo3Add2,
+      shipTo3Add3,
+      shipTo3Area,
+      shipTo3City,
+      shipTo3Pin,
+      shipTo3StateCd,
+
+      shipTo4Add1,
+      shipTo4Add2,
+      shipTo4Add3,
+      shipTo4Area,
+      shipTo4City,
+      shipTo4Pin,
+      shipTo4StateCd,
+
+      shipTo5Add1,
+      shipTo5Add2,
+      shipTo5Add3,
+      shipTo5Area,
+      shipTo5City,
+      shipTo5Pin,
+      shipTo5StateCd,
+
       custGST,
       custPAN,
       custPeso,
@@ -132,8 +193,14 @@ exports.updateCustomer = async (req, res, next) => {
     for (let key of [
       'depotCd','custName','custCd','empCdMapped','routeCdMapped',
       'billToAdd1','billToAdd2','billToAdd3','billArea','billCity','billPin','billStateCd',
+
+      // Ship-to 1..5
       'shipTo1Add1','shipTo1Add2','shipTo1Add3','shipTo1Area','shipTo1City','shipTo1Pin','shipTo1StateCd',
       'shipTo2Add1','shipTo2Add2','shipTo2Add3','shipTo2Area','shipTo2City','shipTo2Pin','shipTo2StateCd',
+      'shipTo3Add1','shipTo3Add2','shipTo3Add3','shipTo3Area','shipTo3City','shipTo3Pin','shipTo3StateCd',
+      'shipTo4Add1','shipTo4Add2','shipTo4Add3','shipTo4Area','shipTo4City','shipTo4Pin','shipTo4StateCd',
+      'shipTo5Add1','shipTo5Add2','shipTo5Add3','shipTo5Area','shipTo5City','shipTo5Pin','shipTo5StateCd',
+
       'custGST','custPAN','custPeso','tradeLicNo','status','agreement','validity',
       'contactPerson','mobileNo'
     ]) {

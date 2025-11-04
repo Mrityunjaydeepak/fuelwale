@@ -59,11 +59,38 @@ const CustomerSchema = new Schema({
   shipTo2Pin:     { type: Number },
   shipTo2StateCd: { type: String, maxlength: 2, trim: true },
 
+  // Shipping address 3
+  shipTo3Add1:    { type: String, maxlength: 30, trim: true },
+  shipTo3Add2:    { type: String, maxlength: 30, trim: true },
+  shipTo3Add3:    { type: String, maxlength: 30, trim: true },
+  shipTo3Area:    { type: String, maxlength: 30, trim: true },
+  shipTo3City:    { type: String, maxlength: 20, trim: true },
+  shipTo3Pin:     { type: Number },
+  shipTo3StateCd: { type: String, maxlength: 2, trim: true },
+
+  // Shipping address 4
+  shipTo4Add1:    { type: String, maxlength: 30, trim: true },
+  shipTo4Add2:    { type: String, maxlength: 30, trim: true },
+  shipTo4Add3:    { type: String, maxlength: 30, trim: true },
+  shipTo4Area:    { type: String, maxlength: 30, trim: true },
+  shipTo4City:    { type: String, maxlength: 20, trim: true },
+  shipTo4Pin:     { type: Number },
+  shipTo4StateCd: { type: String, maxlength: 2, trim: true },
+
+  // Shipping address 5
+  shipTo5Add1:    { type: String, maxlength: 30, trim: true },
+  shipTo5Add2:    { type: String, maxlength: 30, trim: true },
+  shipTo5Add3:    { type: String, maxlength: 30, trim: true },
+  shipTo5Area:    { type: String, maxlength: 30, trim: true },
+  shipTo5City:    { type: String, maxlength: 20, trim: true },
+  shipTo5Pin:     { type: Number },
+  shipTo5StateCd: { type: String, maxlength: 2, trim: true },
+
   // Tax/ID numbers
-  custGST:   { type: String, trim: true },
-  custPAN:   { type: String, trim: true },
-  custPeso:  { type: String, maxlength: 30, trim: true },
-  tradeLicNo:{ type: String, maxlength: 30, trim: true },
+  custGST:        { type: String, trim: true },
+  custPAN:        { type: String, trim: true },
+  custPeso:       { type: String, maxlength: 30, trim: true },
+  tradeLicNo:     { type: String, maxlength: 30, trim: true },
 
   // Status & agreement
   status: {
@@ -79,9 +106,9 @@ const CustomerSchema = new Schema({
   },
 
   // Agreement validity & contact
-  validity:      { type: Date },
-  contactPerson: { type: String, trim: true },
-  mobileNo:      { type: String, trim: true }
+  validity:       { type: Date },
+  contactPerson:  { type: String, trim: true },
+  mobileNo:       { type: String, trim: true }
 }, {
   timestamps: true
 });
