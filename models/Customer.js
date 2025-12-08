@@ -23,7 +23,7 @@ const CustomerSchema = new Schema({
     type: String,
     required: true,
     minlength: 3,
-    maxlength: 3,
+    maxlength: 6,
     trim: true,
     unique: true
   },
