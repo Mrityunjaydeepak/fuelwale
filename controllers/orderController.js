@@ -63,10 +63,6 @@ function round2(n) {
   return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 }
 
-/**
- * Extract first 2 consecutive digits from a string; pad/truncate to 2.
- * Returns '00' if not found.
- */
 function to2DigitCode(v) {
   const s = String(v ?? '').trim();
   const m = s.match(/\d{2}/);
@@ -76,9 +72,6 @@ function to2DigitCode(v) {
   return '00';
 }
 
-/**
- * Format Date -> ddmmyy (6 digits)
- */
 function formatDDMMYY(d) {
   const dt = d ? new Date(d) : new Date();
   const dd = String(dt.getDate()).padStart(2, '0');
@@ -87,9 +80,6 @@ function formatDDMMYY(d) {
   return `${dd}${mm}${yy}`;
 }
 
-/**
- * Try to figure out which ship-to was used and pick the right State Code.
- */
 function deriveStateCode2Digits(customer, shipToAddress) {
   const hay = String(shipToAddress || '').toLowerCase();
 
@@ -106,9 +96,6 @@ function deriveStateCode2Digits(customer, shipToAddress) {
   return to2DigitCode(chosen);
 }
 
-/**
- * Atomically get next running number (1..999) for a given prefix.
- */
 async function getNextRunningNo(prefix) {
   const doc = await OrderCounter.findOneAndUpdate(
     { _id: prefix },
@@ -117,16 +104,10 @@ async function getNextRunningNo(prefix) {
   ).lean();
 
   if (!doc || typeof doc.seq !== 'number') throw new Error('Counter not available');
-  if (doc.seq > 999) {
-    throw new Error(`Running number exhausted for series ${prefix} ( > 999 )`);
-  }
+  if (doc.seq > 999) throw new Error(`Running number exhausted for series ${prefix} ( > 999 )`);
   return doc.seq;
 }
 
-/**
- * Build the Order No: SS DD ddmmyy RRR
- * Returns: { orderNo, parts:{ stateCode, depotCode, ddmmyy, run } }
- */
 async function generateOrderNo({ customer, shipToAddress, deliveryDate }) {
   const stateCode = deriveStateCode2Digits(customer, shipToAddress);
   const depotCode = to2DigitCode(customer.depotCd);
@@ -142,9 +123,6 @@ async function generateOrderNo({ customer, shipToAddress, deliveryDate }) {
   };
 }
 
-/**
- * Sum invoices - payments per customer.
- */
 async function computeOutstandingMap(customerIds) {
   const ids = customerIds.filter(isObjectId);
   if (!ids.length) return {};
@@ -155,9 +133,7 @@ async function computeOutstandingMap(customerIds) {
     { $match: { customer: { $in: matchIds } } },
     { $group: { _id: '$customer', total: { $sum: '$totalAmount' } } },
   ]);
-  const invoiceMap = Object.fromEntries(
-    invAgg.map((x) => [String(x._id), Number(x.total || 0)])
-  );
+  const invoiceMap = Object.fromEntries(invAgg.map((x) => [String(x._id), Number(x.total || 0)]));
 
   let paymentMap = {};
   if (PaymentReceived) {
@@ -165,9 +141,7 @@ async function computeOutstandingMap(customerIds) {
       { $match: { customer: { $in: matchIds } } },
       { $group: { _id: '$customer', total: { $sum: '$amount' } } },
     ]);
-    paymentMap = Object.fromEntries(
-      payAgg.map((x) => [String(x._id), Number(x.total || 0)])
-    );
+    paymentMap = Object.fromEntries(payAgg.map((x) => [String(x._id), Number(x.total || 0)]));
   }
 
   const out = {};
@@ -177,6 +151,22 @@ async function computeOutstandingMap(customerIds) {
     out[id] = round2(inv - pay);
   }
   return out;
+}
+
+// NEW: resolve createdBy from req.user OR fallback to body (localStorage user.id)
+function resolveCreatedBy(req) {
+  const candidates = [
+    req.user?._id,
+    req.user?.id,           // <-- your auth might set this
+    req.user?.employeeId,
+    req.user?.employee?._id,
+    req.body?.createdBy,    // <-- from frontend localStorage user.id
+  ];
+
+  for (const c of candidates) {
+    if (c && isObjectId(c)) return c;
+  }
+  return null;
 }
 
 /* -------------------- GET /orders/customers -------------------- */
@@ -225,7 +215,7 @@ router.get('/', async (req, res, next) => {
   try {
     const orders = await Order.find()
       .populate('customer', 'custCd custName depotCd')
-      .populate('createdBy', 'empCd name') // safe even if createdBy is null
+      .populate('createdBy', 'empCd name userId') // ok even if null
       .lean();
 
     res.json(orders);
@@ -242,7 +232,7 @@ router.get('/:id', async (req, res, next) => {
 
     const order = await Order.findById(id)
       .populate('customer', 'custCd custName depotCd')
-      .populate('createdBy', 'empCd name')
+      .populate('createdBy', 'empCd name userId')
       .lean();
 
     if (!order) return res.status(404).json({ error: 'Not found' });
@@ -296,14 +286,14 @@ router.post('/', async (req, res, next) => {
       deliveryDate: deliveryDate ? new Date(deliveryDate) : new Date(),
     });
 
-    // createdBy is nullable in schema; set it when available
-    const createdBy = req.user?._id && isObjectId(req.user._id) ? req.user._id : null;
+    // NEW: createdBy from req.user OR fallback to req.body.createdBy (localStorage user.id)
+    const createdBy = resolveCreatedBy(req);
 
     const created = await Order.create({
       customer: custId,
       shipToAddress: String(shipToAddress || '').trim(),
 
-      createdBy, // <<--- NEW (nullable)
+      createdBy, // <-- will now store "6904c434da0c7e9840a873f5" when provided/available
 
       orderNo,
       orderNoMeta: parts,
@@ -377,7 +367,7 @@ router.put('/:id', async (req, res, next) => {
     // IMPORTANT: We do NOT allow changing these via update.
     delete payload.orderNo;
     delete payload.orderNoMeta;
-    delete payload.createdBy; // prevent tampering; old orders may have null anyway
+    delete payload.createdBy; // prevent tampering
 
     const updated = await Order.findByIdAndUpdate(id, payload, { new: true });
     if (!updated) return res.status(404).json({ error: 'Not found' });
