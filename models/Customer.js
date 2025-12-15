@@ -14,7 +14,7 @@ const CustomerSchema = new Schema({
   custName: {
     type: String,
     required: true,
-    maxlength: 20,
+    maxlength: 50,
     trim: true
   },
 
@@ -23,7 +23,7 @@ const CustomerSchema = new Schema({
     type: String,
     required: true,
     minlength: 3,
-    maxlength: 6,
+    maxlength: 7,
     trim: true,
     unique: true
   },

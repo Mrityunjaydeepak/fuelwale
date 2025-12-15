@@ -7,10 +7,13 @@ const requireAuth = require('../middleware/requireAuth');
 const Order = require('../models/Order');
 const Customer = require('../models/Customer');
 const Invoice = require('../models/Invoice');
+const Employee = require('../models/Employee');
 
 // Optional (payments). If your app doesn't have it, we ignore payments (0).
 let PaymentReceived = null;
-try { PaymentReceived = require('../models/PaymentReceived'); } catch {}
+try {
+  PaymentReceived = require('../models/PaymentReceived');
+} catch {}
 
 router.use(requireAuth);
 
@@ -153,20 +156,60 @@ async function computeOutstandingMap(customerIds) {
   return out;
 }
 
-// NEW: resolve createdBy from req.user OR fallback to body (localStorage user.id)
-function resolveCreatedBy(req) {
+// createdBy should be an Employee _id (NOT User _id). If auth provides employee id, use it.
+function resolveCreatedByEmployeeId(req) {
   const candidates = [
-    req.user?._id,
-    req.user?.id,           // <-- your auth might set this
-    req.user?.employeeId,
     req.user?.employee?._id,
-    req.body?.createdBy,    // <-- from frontend localStorage user.id
+    req.user?.employee,
+    req.user?.employeeId,
+    req.user?.empId,
+    req.body?.createdByEmployeeId, // optional explicit employee id
   ];
 
   for (const c of candidates) {
-    if (c && isObjectId(c)) return c;
+    if (c && isObjectId(c)) return String(c);
   }
   return null;
+}
+
+/**
+ * Attach createdByName + createdByUserId to orders.
+ * - If createdBy populated -> use createdBy.empCd / createdBy.empName
+ * - Else fallback to order.empCd -> lookup Employee by empCd
+ */
+async function attachEmployeeNameByEmpCd(orders) {
+  const needEmpCds = [
+    ...new Set(
+      orders
+        .filter((o) => !o?.createdBy && o?.empCd)
+        .map((o) => String(o.empCd || '').trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  let nameByCode = {};
+  if (needEmpCds.length) {
+    const emps = await Employee.find({ empCd: { $in: needEmpCds } })
+      .select('empCd empName')
+      .lean();
+
+    nameByCode = Object.fromEntries(
+      emps.map((e) => [String(e.empCd || '').trim(), String(e.empName || '').trim()])
+    );
+  }
+
+  return orders.map((o) => {
+    const createdByCode = o?.createdBy?.empCd ? String(o.createdBy.empCd).trim() : String(o.empCd || '').trim();
+    const createdByName = o?.createdBy?.empName
+      ? String(o.createdBy.empName).trim()
+      : (nameByCode[createdByCode] || '');
+
+    return {
+      ...o,
+      createdByUserId: createdByCode || '',
+      createdByName: createdByName || '',
+    };
+  });
 }
 
 /* -------------------- GET /orders/customers -------------------- */
@@ -215,10 +258,12 @@ router.get('/', async (req, res, next) => {
   try {
     const orders = await Order.find()
       .populate('customer', 'custCd custName depotCd')
-      .populate('createdBy', 'empCd name userId') // ok even if null
+      .populate('createdBy', 'empCd empName') // FIXED (your Employee schema uses empName)
+      .sort({ createdAt: -1 })
       .lean();
 
-    res.json(orders);
+    const out = await attachEmployeeNameByEmpCd(orders);
+    res.json(out);
   } catch (err) {
     next(err);
   }
@@ -232,11 +277,13 @@ router.get('/:id', async (req, res, next) => {
 
     const order = await Order.findById(id)
       .populate('customer', 'custCd custName depotCd')
-      .populate('createdBy', 'empCd name userId')
+      .populate('createdBy', 'empCd empName')
       .lean();
 
     if (!order) return res.status(404).json({ error: 'Not found' });
-    res.json(order);
+
+    const [out] = await attachEmployeeNameByEmpCd([order]);
+    res.json(out);
   } catch (err) {
     next(err);
   }
@@ -252,6 +299,7 @@ router.post('/', async (req, res, next) => {
       items,
       deliveryDate,
       deliveryTimeSlot,
+      empCd, // allow frontend to send code (optional)
     } = req.body;
 
     const custId = toId(customerId);
@@ -286,14 +334,19 @@ router.post('/', async (req, res, next) => {
       deliveryDate: deliveryDate ? new Date(deliveryDate) : new Date(),
     });
 
-    // NEW: createdBy from req.user OR fallback to req.body.createdBy (localStorage user.id)
-    const createdBy = resolveCreatedBy(req);
+    // store empCd (code) on order (this is what you want to use for name lookup)
+    const finalEmpCd = String(req.user?.empCd || empCd || '').trim();
+
+    // store createdBy only if we truly have Employee _id
+    const createdBy = resolveCreatedByEmployeeId(req);
 
     const created = await Order.create({
+      empCd: finalEmpCd || undefined,
+
       customer: custId,
       shipToAddress: String(shipToAddress || '').trim(),
 
-      createdBy, // <-- will now store "6904c434da0c7e9840a873f5" when provided/available
+      createdBy: createdBy || null,
 
       orderNo,
       orderNoMeta: parts,
@@ -367,7 +420,9 @@ router.put('/:id', async (req, res, next) => {
     // IMPORTANT: We do NOT allow changing these via update.
     delete payload.orderNo;
     delete payload.orderNoMeta;
-    delete payload.createdBy; // prevent tampering
+    delete payload.createdBy; // prevent tampering (createdBy should come from auth)
+    // (empCd can remain editable if you want, but normally you should NOT allow it; optional)
+    // delete payload.empCd;
 
     const updated = await Order.findByIdAndUpdate(id, payload, { new: true });
     if (!updated) return res.status(404).json({ error: 'Not found' });

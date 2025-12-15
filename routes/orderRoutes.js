@@ -71,16 +71,39 @@ router.get('/', requireAuth, async (req, res, next) => {
     const custs = await Customer.find({ empCdMapped: empCd }).select('_id');
     const custIds = custs.map(c => c._id);
 
-    // return orders of those customers (you can also include { empCd } if you want)
     const orders = await Order.find({ customer: { $in: custIds } })
       .populate('customer', 'custName custCd')
+      .populate('createdBy', 'empCd empName')
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json(orders);
+    // attach createdByName from empCd when createdBy is missing
+    const needEmpCds = [
+      ...new Set(
+        orders
+          .filter(o => !o.createdBy && o.empCd)
+          .map(o => String(o.empCd || '').trim())
+          .filter(Boolean)
+      )
+    ];
+
+    let nameByCode = {};
+    if (needEmpCds.length) {
+      const emps = await Employee.find({ empCd: { $in: needEmpCds } })
+        .select('empCd empName')
+        .lean();
+      nameByCode = Object.fromEntries(emps.map(e => [String(e.empCd).trim(), String(e.empName || '').trim()]));
+    }
+
+    const out = orders.map(o => {
+      const code = o?.createdBy?.empCd ? String(o.createdBy.empCd).trim() : String(o.empCd || '').trim();
+      const name = o?.createdBy?.empName ? String(o.createdBy.empName).trim() : (nameByCode[code] || '');
+      return { ...o, createdByUserId: code || '', createdByName: name || '' };
+    });
+
+    res.json(out);
   } catch (err) { next(err); }
 });
-
 /** 3.2 — Place a new order (unchanged) */
 router.post('/', requireAuth, async (req, res, next) => {
   try {

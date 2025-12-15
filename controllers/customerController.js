@@ -1,6 +1,23 @@
 // controllers/customerController.js
-
 const Customer = require('../models/Customer');
+
+/**
+ * Prefix 'C' to customer code if it is exactly 6 digits.
+ * Also normalizes c123456 -> C123456 and avoids double-prefixing.
+ */
+function normalizeCustCd(value) {
+  if (value == null) return value;
+
+  const s = String(value).trim();
+
+  // Already like C123456 (case-insensitive) -> standardize to uppercase C
+  if (/^c\d{6}$/.test(s)) return `C${s.slice(1)}`;
+
+  // Exactly 6 digits -> prefix C
+  if (/^\d{6}$/.test(s)) return `C${s}`;
+
+  return s; // otherwise leave as-is
+}
 
 /**
  * List all customers
@@ -115,7 +132,7 @@ exports.createCustomer = async (req, res, next) => {
     const customer = await Customer.create({
       depotCd,
       custName,
-      custCd,
+      custCd: normalizeCustCd(custCd),
       empCdMapped,
       routeCdMapped,
       billToAdd1,
@@ -204,7 +221,10 @@ exports.updateCustomer = async (req, res, next) => {
       'custGST','custPAN','custPeso','tradeLicNo','status','agreement','validity',
       'contactPerson','mobileNo'
     ]) {
-      if (req.body[key] != null) updates[key] = req.body[key];
+      if (req.body[key] != null) {
+        updates[key] =
+          key === 'custCd' ? normalizeCustCd(req.body[key]) : req.body[key];
+      }
     }
 
     const customer = await Customer.findByIdAndUpdate(
