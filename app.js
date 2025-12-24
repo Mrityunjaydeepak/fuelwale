@@ -24,6 +24,7 @@ const userRouter             = require('./controllers/userController');
 const employeeRouter         = require('./controllers/employeeController');
 const depotRouter            = require('./controllers/depotController');
 const customerRouter         = require('./routes/customerRoutes');
+
 const routeRouter            = require('./controllers/routeController');
 const loadingRouter          = require('./controllers/loadingController');
 const loadingSourceRouter    = require('./controllers/loadingsourceController');
@@ -95,6 +96,8 @@ app.use('/api/deliveries',          deliveryRouter);
 app.use('/api/stations',            stationController);
 app.use('/api/invoices',            invoiceRoutes);
 app.use('/api/fleets', fleetsRouter);
+app.use('/api/_debug', require('./routes/_debugAuth'));
+
 
 app.use('/api/payrec', require('./controllers/payrecController'));
 

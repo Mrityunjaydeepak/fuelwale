@@ -1,27 +1,22 @@
-// controllers/customerController.js
 const Customer = require('../models/Customer');
 
-/**
- * Prefix 'C' to customer code if it is exactly 6 digits.
- * Also normalizes c123456 -> C123456 and avoids double-prefixing.
- */
 function normalizeCustCd(value) {
   if (value == null) return value;
-
   const s = String(value).trim();
-
-  // Already like C123456 (case-insensitive) -> standardize to uppercase C
-  if (/^c\d{6}$/.test(s)) return `C${s.slice(1)}`;
-
-  // Exactly 6 digits -> prefix C
+  if (/^c\d{6}$/i.test(s)) return `C${s.slice(1)}`;
   if (/^\d{6}$/.test(s)) return `C${s}`;
-
-  return s; // otherwise leave as-is
+  return s;
 }
 
-/**
- * List all customers
- */
+function norm2(v) {
+  if (v == null || v === '') return undefined;
+  const s = String(v).trim();
+  if (!s) return undefined;
+  // allow "27" or 27 -> "27"
+  const two = s.padStart(2, '0');
+  return /^\d{2}$/.test(two) ? two : s;
+}
+
 exports.listCustomers = async (req, res, next) => {
   try {
     const customers = await Customer.find();
@@ -31,168 +26,33 @@ exports.listCustomers = async (req, res, next) => {
   }
 };
 
-/**
- * Fetch one customer by ID
- */
 exports.getCustomer = async (req, res, next) => {
   try {
     const customer = await Customer.findById(req.params.id);
-    if (!customer) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
     res.json(customer);
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Create a new customer
- */
 exports.createCustomer = async (req, res, next) => {
   try {
-    const {
-      depotCd,
-      custName,
-      custCd,
-      empCdMapped,
-      routeCdMapped,
-      billToAdd1,
-      billToAdd2,
-      billToAdd3,
-      billArea,
-      billCity,
-      billPin,
-      billStateCd,
+    const b = req.body || {};
 
-      // Shipping 1
-      shipTo1Add1,
-      shipTo1Add2,
-      shipTo1Add3,
-      shipTo1Area,
-      shipTo1City,
-      shipTo1Pin,
-      shipTo1StateCd,
-
-      // Shipping 2
-      shipTo2Add1,
-      shipTo2Add2,
-      shipTo2Add3,
-      shipTo2Area,
-      shipTo2City,
-      shipTo2Pin,
-      shipTo2StateCd,
-
-      // Shipping 3
-      shipTo3Add1,
-      shipTo3Add2,
-      shipTo3Add3,
-      shipTo3Area,
-      shipTo3City,
-      shipTo3Pin,
-      shipTo3StateCd,
-
-      // Shipping 4
-      shipTo4Add1,
-      shipTo4Add2,
-      shipTo4Add3,
-      shipTo4Area,
-      shipTo4City,
-      shipTo4Pin,
-      shipTo4StateCd,
-
-      // Shipping 5
-      shipTo5Add1,
-      shipTo5Add2,
-      shipTo5Add3,
-      shipTo5Area,
-      shipTo5City,
-      shipTo5Pin,
-      shipTo5StateCd,
-
-      // Tax/IDs and misc
-      custGST,
-      custPAN,
-      custPeso,
-      tradeLicNo,
-      status,
-      agreement,
-      validity,
-      contactPerson,
-      mobileNo
-    } = req.body;
-
-    // Validate required
-    if (!depotCd || !custName || !custCd) {
-      return res.status(400).json({
-        error: 'depotCd, custName and custCd are required'
-      });
+    if (!b.depotCd || !b.custName || !b.custCd) {
+      return res.status(400).json({ error: 'depotCd, custName and custCd are required' });
     }
 
     const customer = await Customer.create({
-      depotCd,
-      custName,
-      custCd: normalizeCustCd(custCd),
-      empCdMapped,
-      routeCdMapped,
-      billToAdd1,
-      billToAdd2,
-      billToAdd3,
-      billArea,
-      billCity,
-      billPin,
-      billStateCd,
-
-      // Ship-to 1..5
-      shipTo1Add1,
-      shipTo1Add2,
-      shipTo1Add3,
-      shipTo1Area,
-      shipTo1City,
-      shipTo1Pin,
-      shipTo1StateCd,
-
-      shipTo2Add1,
-      shipTo2Add2,
-      shipTo2Add3,
-      shipTo2Area,
-      shipTo2City,
-      shipTo2Pin,
-      shipTo2StateCd,
-
-      shipTo3Add1,
-      shipTo3Add2,
-      shipTo3Add3,
-      shipTo3Area,
-      shipTo3City,
-      shipTo3Pin,
-      shipTo3StateCd,
-
-      shipTo4Add1,
-      shipTo4Add2,
-      shipTo4Add3,
-      shipTo4Area,
-      shipTo4City,
-      shipTo4Pin,
-      shipTo4StateCd,
-
-      shipTo5Add1,
-      shipTo5Add2,
-      shipTo5Add3,
-      shipTo5Area,
-      shipTo5City,
-      shipTo5Pin,
-      shipTo5StateCd,
-
-      custGST,
-      custPAN,
-      custPeso,
-      tradeLicNo,
-      status,
-      agreement,
-      validity,
-      contactPerson,
-      mobileNo
+      ...b,
+      custCd: normalizeCustCd(b.custCd),
+      billStateCd: norm2(b.billStateCd),
+      shipTo1StateCd: norm2(b.shipTo1StateCd),
+      shipTo2StateCd: norm2(b.shipTo2StateCd),
+      shipTo3StateCd: norm2(b.shipTo3StateCd),
+      shipTo4StateCd: norm2(b.shipTo4StateCd),
+      shipTo5StateCd: norm2(b.shipTo5StateCd),
     });
 
     res.status(201).json(customer);
@@ -201,30 +61,14 @@ exports.createCustomer = async (req, res, next) => {
   }
 };
 
-/**
- * Update an existing customer
- */
 exports.updateCustomer = async (req, res, next) => {
   try {
-    const updates = {};
-    for (let key of [
-      'depotCd','custName','custCd','empCdMapped','routeCdMapped',
-      'billToAdd1','billToAdd2','billToAdd3','billArea','billCity','billPin','billStateCd',
+    const updates = { ...(req.body || {}) };
+    if (updates.custCd != null) updates.custCd = normalizeCustCd(updates.custCd);
 
-      // Ship-to 1..5
-      'shipTo1Add1','shipTo1Add2','shipTo1Add3','shipTo1Area','shipTo1City','shipTo1Pin','shipTo1StateCd',
-      'shipTo2Add1','shipTo2Add2','shipTo2Add3','shipTo2Area','shipTo2City','shipTo2Pin','shipTo2StateCd',
-      'shipTo3Add1','shipTo3Add2','shipTo3Add3','shipTo3Area','shipTo3City','shipTo3Pin','shipTo3StateCd',
-      'shipTo4Add1','shipTo4Add2','shipTo4Add3','shipTo4Area','shipTo4City','shipTo4Pin','shipTo4StateCd',
-      'shipTo5Add1','shipTo5Add2','shipTo5Add3','shipTo5Area','shipTo5City','shipTo5Pin','shipTo5StateCd',
-
-      'custGST','custPAN','custPeso','tradeLicNo','status','agreement','validity',
-      'contactPerson','mobileNo'
-    ]) {
-      if (req.body[key] != null) {
-        updates[key] =
-          key === 'custCd' ? normalizeCustCd(req.body[key]) : req.body[key];
-      }
+    if (updates.billStateCd != null) updates.billStateCd = norm2(updates.billStateCd);
+    for (const k of ['shipTo1StateCd','shipTo2StateCd','shipTo3StateCd','shipTo4StateCd','shipTo5StateCd']) {
+      if (updates[k] != null) updates[k] = norm2(updates[k]);
     }
 
     const customer = await Customer.findByIdAndUpdate(
@@ -233,24 +77,17 @@ exports.updateCustomer = async (req, res, next) => {
       { new: true, runValidators: true }
     );
 
-    if (!customer) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
     res.json(customer);
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * Remove a customer
- */
 exports.deleteCustomer = async (req, res, next) => {
   try {
     const deleted = await Customer.findByIdAndDelete(req.params.id);
-    if (!deleted) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
+    if (!deleted) return res.status(404).json({ error: 'Customer not found' });
     res.json({ deleted: true });
   } catch (err) {
     next(err);
