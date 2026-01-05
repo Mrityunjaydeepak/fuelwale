@@ -13,7 +13,7 @@ const Employee = require('../models/Employee');
 let PaymentReceived = null;
 try {
   PaymentReceived = require('../models/PaymentReceived');
-} catch {}
+} catch { }
 
 router.use(requireAuth);
 
@@ -227,8 +227,8 @@ router.get('/customers', async (req, res, next) => {
     const customers = await Customer.find(query)
       .select(
         'custCd custName status depotCd ' +
-          'shipTo1Add1 shipTo1Add2 shipTo1Add3 shipTo1Area shipTo1City shipTo1Pin shipTo1StateCd ' +
-          'shipTo2Add1 shipTo2Add2 shipTo2Add3 shipTo2Area shipTo2City shipTo2Pin shipTo2StateCd'
+        'shipTo1Add1 shipTo1Add2 shipTo1Add3 shipTo1Area shipTo1City shipTo1Pin shipTo1StateCd ' +
+        'shipTo2Add1 shipTo2Add2 shipTo2Add3 shipTo2Area shipTo2City shipTo2Pin shipTo2StateCd'
       )
       .sort({ custName: 1 })
       .lean();
@@ -258,7 +258,7 @@ router.get('/', async (req, res, next) => {
   try {
     const orders = await Order.find()
       .populate('customer', 'custCd custName depotCd')
-      .populate('createdBy', 'empCd empName') // FIXED (your Employee schema uses empName)
+      .populate('createdBy', 'empCd empName') // Employee schema uses empName
       .sort({ createdAt: -1 })
       .lean();
 
@@ -299,7 +299,8 @@ router.post('/', async (req, res, next) => {
       items,
       deliveryDate,
       deliveryTimeSlot,
-      empCd, // allow frontend to send code (optional)
+      empCd,      // allow frontend to send code (optional)
+      remarks,    // NEW: optional remarks from client
     } = req.body;
 
     const custId = toId(customerId);
@@ -313,8 +314,8 @@ router.post('/', async (req, res, next) => {
     const customer = await Customer.findById(custId)
       .select(
         'depotCd ' +
-          'shipTo1Add1 shipTo1Add2 shipTo1Add3 shipTo1Area shipTo1City shipTo1Pin shipTo1StateCd ' +
-          'shipTo2Add1 shipTo2Add2 shipTo2Add3 shipTo2Area shipTo2City shipTo2Pin shipTo2StateCd'
+        'shipTo1Add1 shipTo1Add2 shipTo1Add3 shipTo1Area shipTo1City shipTo1Pin shipTo1StateCd ' +
+        'shipTo2Add1 shipTo2Add2 shipTo2Add3 shipTo2Area shipTo2City shipTo2Pin shipTo2StateCd'
       )
       .lean();
 
@@ -334,7 +335,7 @@ router.post('/', async (req, res, next) => {
       deliveryDate: deliveryDate ? new Date(deliveryDate) : new Date(),
     });
 
-    // store empCd (code) on order (this is what you want to use for name lookup)
+    // store empCd (code) on order
     const finalEmpCd = String(req.user?.empCd || empCd || '').trim();
 
     // store createdBy only if we truly have Employee _id
@@ -357,6 +358,9 @@ router.post('/', async (req, res, next) => {
       deliveryTimeSlot: String(deliveryTimeSlot || '').trim(),
       orderStatus: 'PENDING',
       confirmedAt: new Date(),
+
+      // NEW: remarks stored if provided
+      remarks: typeof remarks === 'string' ? remarks.trim() : '',
     });
 
     res.status(201).json(created);
@@ -415,6 +419,11 @@ router.put('/:id', async (req, res, next) => {
         quantity: Number(i.quantity || 0),
         rate: Number(i.rate || 0),
       }));
+    }
+
+    // Normalize remarks if present
+    if (typeof payload.remarks === 'string') {
+      payload.remarks = payload.remarks.trim();
     }
 
     // IMPORTANT: We do NOT allow changing these via update.

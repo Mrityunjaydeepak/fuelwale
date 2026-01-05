@@ -1,9 +1,10 @@
 // routes/orders.js
-const express = require('express');
-const router  = express.Router();
+const express  = require('express');
+const router   = express.Router();
 const requireAuth = require('../middleware/requireAuth');
 const Customer = require('../models/Customer');
 const Order    = require('../models/Order');
+const Employee = require('../models/Employee'); // needed for createdBy name lookup
 
 /** helper: build a printable multi-line address from Customer fields */
 function buildShipTo(c, n) {
@@ -16,7 +17,9 @@ function buildShipTo(c, n) {
   const ST = c[`shipTo${n}StateCd`];
 
   const hasAnything =
-    [A1, A2, A3, AR, CT, PN, ST].some(v => v !== undefined && v !== null && String(v).trim() !== '');
+    [A1, A2, A3, AR, CT, PN, ST].some(
+      v => v !== undefined && v !== null && String(v).trim() !== ''
+    );
 
   if (!hasAnything) return null;
 
@@ -55,7 +58,7 @@ router.get('/customers', requireAuth, async (req, res, next) => {
       selectable:        c.status === 'Active',
       outstandingAmount: c.outstandingAmount ?? c.outstanding ?? 0,
       // Provide up to 5 shipping addresses, formatted
-      shipToAddresses:   collectShipTos(c)
+      shipToAddresses:   collectShipTos(c),
     }));
 
     res.json(result);
@@ -92,29 +95,44 @@ router.get('/', requireAuth, async (req, res, next) => {
       const emps = await Employee.find({ empCd: { $in: needEmpCds } })
         .select('empCd empName')
         .lean();
-      nameByCode = Object.fromEntries(emps.map(e => [String(e.empCd).trim(), String(e.empName || '').trim()]));
+      nameByCode = Object.fromEntries(
+        emps.map(e => [String(e.empCd).trim(), String(e.empName || '').trim()])
+      );
     }
 
     const out = orders.map(o => {
-      const code = o?.createdBy?.empCd ? String(o.createdBy.empCd).trim() : String(o.empCd || '').trim();
-      const name = o?.createdBy?.empName ? String(o.createdBy.empName).trim() : (nameByCode[code] || '');
+      const code = o?.createdBy?.empCd
+        ? String(o.createdBy.empCd).trim()
+        : String(o.empCd || '').trim();
+      const name = o?.createdBy?.empName
+        ? String(o.createdBy.empName).trim()
+        : (nameByCode[code] || '');
       return { ...o, createdByUserId: code || '', createdByName: name || '' };
     });
 
     res.json(out);
   } catch (err) { next(err); }
 });
-/** 3.2 — Place a new order (unchanged) */
+
+/** 3.2 — Place a new order */
 router.post('/', requireAuth, async (req, res, next) => {
   try {
     const empCd = req.user.empCd;
-    const { customerId, shipToAddress, items, deliveryDate, deliveryTimeSlot } = req.body;
+    const {
+      customerId,
+      shipToAddress,
+      items,
+      deliveryDate,
+      deliveryTimeSlot,
+      remarks, // NEW: optional remarks
+    } = req.body;
 
     // 1) ensure this customer belongs to the emp & is Active
     const cust = await Customer.findOne({ _id: customerId, empCdMapped: empCd });
     if (!cust) return res.status(403).json({ error: 'Customer not accessible' });
-    if (cust.status !== 'Active')
+    if (cust.status !== 'Active') {
       return res.status(400).json({ error: 'Cannot order for inactive/suspended customer' });
+    }
 
     // 2) create the order
     // NOTE: assuming your system generates orderNo elsewhere (hook/service).
@@ -126,6 +144,8 @@ router.post('/', requireAuth, async (req, res, next) => {
       deliveryDate,
       deliveryTimeSlot,
       confirmedAt:      new Date(),
+      // NEW: store remarks if provided; otherwise empty string
+      remarks: typeof remarks === 'string' ? remarks.trim() : '',
     });
 
     res.status(201).json(order);
@@ -154,7 +174,12 @@ router.patch('/:id/status', requireAuth, async (req, res, next) => {
 
     const updated = await Order.findByIdAndUpdate(
       req.params.id,
-      { $set: { orderStatus, allocatedAt: orderStatus === 'ASSIGNED' ? new Date() : undefined } },
+      {
+        $set: {
+          orderStatus,
+          allocatedAt: orderStatus === 'ASSIGNED' ? new Date() : undefined,
+        },
+      },
       { new: true, runValidators: true }
     );
 

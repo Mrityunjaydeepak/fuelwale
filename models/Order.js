@@ -79,6 +79,13 @@ const OrderSchema = new Schema(
       default: 'Regular',
     },
 
+    // NEW: optional remarks
+    remarks: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+
     confirmedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
