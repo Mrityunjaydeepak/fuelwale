@@ -39,6 +39,7 @@ const tripRouter             = require('./controllers/tripController');
 const deliveryRouter         = require('./controllers/deliveryController');
 const vehicleRouter          = require('./controllers/vehicleController');
 const stationController      = require('./controllers/stationController');
+const productController      = require('./controllers/productController');
 const invoiceRoutes          = require('./routes/invoices');
 const fleetsRouter = require('./routes/fleets');
 
@@ -95,6 +96,7 @@ app.use('/api/trips',               tripRouter);
 app.use('/api/deliveries',          deliveryRouter);
 app.use('/api/stations',            stationController);
 app.use('/api/invoices',            invoiceRoutes);
+app.use('/api/products',            productController);
 app.use('/api/fleets', fleetsRouter);
 app.use('/api/_debug', require('./routes/_debugAuth'));
 
