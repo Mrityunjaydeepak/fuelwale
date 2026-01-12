@@ -1,8 +1,9 @@
-// routes/customers.js
 const express = require('express');
 const router = express.Router();
 
 const Customer = require('../models/Customer');
+const customerController = require('../controllers/customerController');
+
 const requireAuth = require('../middleware/requireAuth');
 const requireDepotScope = require('../middleware/requireDepotScope');
 
@@ -22,6 +23,59 @@ router.get('/', async (req, res, next) => {
     return next(err);
   }
 });
+
+/**
+ * GET /api/customers/mapped-sales/:mappedSales
+ * Admin: all depots
+ * Non-admin: only their depot
+ */
+router.get('/mapped-sales/:mappedSales', async (req, res, next) => {
+  try {
+    const { mappedSales } = req.params;
+
+    if (!mappedSales || !mappedSales.trim()) {
+      return res.status(400).json({ error: 'mappedSales is required' });
+    }
+
+    const query = {
+      mappedSales: mappedSales.trim()
+    };
+
+    if (!req.user.isAdmin) {
+      query.depotCd = req.user.depotCd;
+    }
+
+    const customers = await Customer.find(query).lean();
+
+    return res.json(customers);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /api/customers/depot/:depotCd
+ * Admin: any depot
+ * Non-admin: only their own depot
+ */
+router.get(
+  '/depot/:depotCd',
+  requireDepotScope({
+    source: 'params',
+    key: 'depotCd',
+    adminBypass: true,
+    allowMissing: false
+  }),
+  async (req, res, next) => {
+    try {
+      const depotCd = String(req.params.depotCd).trim();
+      const customers = await Customer.find({ depotCd }).lean();
+      return res.json(customers);
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
 
 /**
  * GET /api/customers/:id
@@ -44,8 +98,8 @@ router.get('/:id', async (req, res, next) => {
 
 /**
  * POST /api/customers
- * Admin: can create for any depotCd (must provide depotCd in body)
- * Non-admin: depotCd is forced to req.user.depotCd (ignores body.depotCd)
+ * Admin: can create for any depotCd
+ * Non-admin: depotCd forced from token
  */
 router.post('/', async (req, res, next) => {
   try {
@@ -55,7 +109,9 @@ router.post('/', async (req, res, next) => {
       ? String(body.depotCd || '').trim()
       : String(req.user.depotCd || '').trim();
 
-    if (!depotCd) return res.status(400).json({ error: 'depotCd is required' });
+    if (!depotCd) {
+      return res.status(400).json({ error: 'depotCd is required' });
+    }
 
     const created = await Customer.create({
       ...body,
@@ -78,7 +134,7 @@ router.put('/:id', async (req, res, next) => {
     const updates = { ...(req.body || {}) };
 
     if (!req.user.isAdmin) {
-      delete updates.depotCd; // prevent depot switching
+      delete updates.depotCd;
     }
 
     const query = { _id: req.params.id };
@@ -115,24 +171,5 @@ router.delete('/:id', async (req, res, next) => {
     return next(err);
   }
 });
-
-/**
- * GET /api/customers/depot/:depotCd
- * Admin: any depot
- * Non-admin: only their own depot
- */
-router.get(
-  '/depot/:depotCd',
-  requireDepotScope({ source: 'params', key: 'depotCd', adminBypass: true, allowMissing: false }),
-  async (req, res, next) => {
-    try {
-      const depotCd = String(req.params.depotCd).trim();
-      const customers = await Customer.find({ depotCd }).lean();
-      return res.json(customers);
-    } catch (err) {
-      return next(err);
-    }
-  }
-);
 
 module.exports = router;
